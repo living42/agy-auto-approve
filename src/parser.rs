@@ -1,5 +1,4 @@
 use regex::Regex;
-use serde_json::Value;
 use std::sync::LazyLock;
 use tree_sitter::{Node, Parser};
 
@@ -96,41 +95,4 @@ pub fn commands(src: &str) -> Vec<String> {
         append(src, &mut out);
     }
     out
-}
-pub fn overrides(tool: &str, args: &Value) -> Vec<String> {
-    if tool == "run_command" {
-        let raw = args["CommandLine"].as_str().unwrap_or("").trim();
-        let mut extracted = commands(raw);
-        if extracted.is_empty() && !raw.is_empty() {
-            extracted.push(raw.into());
-        }
-        extracted
-            .iter()
-            .map(|cmd| {
-                let tokens: Vec<_> = cmd.split_whitespace().collect();
-                let text = if tokens.first() == Some(&"gh") {
-                    tokens
-                        .iter()
-                        .take(3)
-                        .take_while(|t| !t.starts_with('-'))
-                        .copied()
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                } else {
-                    cmd.chars().take(80).collect()
-                };
-                format!("command({text})")
-            })
-            .collect()
-    } else if matches!(tool, "write_to_file" | "replace_file_content" | "edit_file") {
-        args["TargetFile"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .or(args["target_file"].as_str())
-            .filter(|s| !s.is_empty())
-            .map(|s| vec![format!("file({s})")])
-            .unwrap_or_default()
-    } else {
-        vec![]
-    }
 }

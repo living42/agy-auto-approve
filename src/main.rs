@@ -111,8 +111,7 @@ async fn main() -> Result<()> {
                 Some(payload) => {
                     let id = audit::request_id();
                     audit::record(&id, "hook_input", json!({"invalid_payload": payload}));
-                    let output =
-                        pipeline::result("ask", "Failed to parse hook stdin payload.", "", None);
+                    let output = pipeline::result("ask", "Failed to parse hook stdin payload.", "");
                     audit::record(
                         &id,
                         "hook_result",
@@ -136,8 +135,7 @@ async fn main() -> Result<()> {
                             "truncated": bytes.len() > 1024 * 1024,
                         }),
                     );
-                    let output =
-                        pipeline::result("ask", "Failed to parse hook stdin payload.", "", None);
+                    let output = pipeline::result("ask", "Failed to parse hook stdin payload.", "");
                     audit::record(
                         &id,
                         "hook_result",

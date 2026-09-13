@@ -258,7 +258,8 @@ impl ConversationState {
 }
 
 /// Construct JSON response payload matching Antigravity hook contract.
-pub fn result(decision: &str, reason: &str, tool: &str, grants: Option<Vec<String>>) -> Value {
+/// Output format: `{"decision": decision, "reason": reason}`.
+pub fn result(decision: &str, reason: &str, tool: &str) -> Value {
     let tag = match decision {
         "allow" => "ALLOWED",
         "deny" => "DENIED",
@@ -299,11 +300,7 @@ pub fn result(decision: &str, reason: &str, tool: &str, grants: Option<Vec<Strin
             decision.to_uppercase()
         );
     }
-    let mut payload = json!({"decision": decision, "reason": reason});
-    if let Some(grants) = grants {
-        payload["permissionOverrides"] = grants.into();
-    }
-    payload
+    json!({"decision": decision, "reason": reason})
 }
 
 /// Primary PreToolUse hook entry point.
@@ -368,18 +365,12 @@ async fn evaluate_inner(payload: &Value, id: &str, stage: &mut &'static str) -> 
             "allow",
             "Internal reviewer process automatically approved.",
             tool,
-            Some(vec![]),
         );
     }
 
     if read_only(tool) {
         *stage = "whitelist";
-        return result(
-            "allow",
-            "Read-only tool automatically approved.",
-            tool,
-            Some(vec![]),
-        );
+        return result("allow", "Read-only tool automatically approved.", tool);
     }
 
     if tool == "manage_task" {
@@ -390,7 +381,6 @@ async fn evaluate_inner(payload: &Value, id: &str, stage: &mut &'static str) -> 
                 "allow",
                 "Read-only task inspection automatically approved.",
                 tool,
-                Some(vec![]),
             );
         }
     }
@@ -398,7 +388,7 @@ async fn evaluate_inner(payload: &Value, id: &str, stage: &mut &'static str) -> 
         && let Some(reason) = blacklist(args["CommandLine"].as_str().unwrap_or(""))
     {
         *stage = "blacklist";
-        return result("deny", &reason, tool, None);
+        return result("deny", &reason, tool);
     }
     let cid = conversation_id(payload);
     let mut state = match ConversationState::open(&config::state_dir(), cid) {
@@ -409,7 +399,6 @@ async fn evaluate_inner(payload: &Value, id: &str, stage: &mut &'static str) -> 
                 "deny",
                 &format!("Fail-closed: cannot open conversation state: {e}"),
                 tool,
-                None,
             );
         }
     };
@@ -426,10 +415,9 @@ async fn evaluate_inner(payload: &Value, id: &str, stage: &mut &'static str) -> 
                 "deny",
                 &format!("Fail-closed: cannot persist circuit breaker state: {e}"),
                 tool,
-                None,
             );
         }
-        return result("force_ask", &reason, tool, None);
+        return result("force_ask", &reason, tool);
     }
     let assessment = match daemon::review_traced(payload, id).await {
         Ok(a) => a,
@@ -451,11 +439,9 @@ async fn evaluate_inner(payload: &Value, id: &str, stage: &mut &'static str) -> 
             "deny",
             &format!("Fail-closed: cannot persist evaluation record: {e}"),
             tool,
-            None,
         );
     }
-    let grants = (assessment.outcome == "allow").then(|| parser::overrides(tool, args));
-    result(&assessment.outcome, &assessment.rationale, tool, grants)
+    result(&assessment.outcome, &assessment.rationale, tool)
 }
 
 /// Handle PostToolUse hook events.

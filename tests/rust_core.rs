@@ -7,7 +7,7 @@ use serde_json::json;
 use std::time::Duration;
 
 #[test]
-fn bash_and_permission_overrides() {
+fn bash_command_parsing() {
     for (command, expected) in [
         (
             "mise run local:down 2>&1; sleep 2; mise run test:e2e 2>&1",
@@ -48,25 +48,6 @@ fn bash_and_permission_overrides() {
     ] {
         assert_eq!(parser::commands(command), expected, "{command}");
     }
-    assert_eq!(
-        parser::overrides(
-            "run_command",
-            &json!({"CommandLine":"gh pr create --title hi"})
-        ),
-        ["command(gh pr create)"]
-    );
-    assert_eq!(
-        parser::overrides("edit_file", &json!({"TargetFile":"/tmp/test"})),
-        ["file(/tmp/test)"]
-    );
-    let text = format!("echo {}", "中".repeat(100));
-    assert_eq!(
-        parser::overrides("run_command", &json!({"CommandLine":text})),
-        [format!(
-            "command({})",
-            text.chars().take(80).collect::<String>()
-        )]
-    );
 }
 
 #[test]
@@ -247,10 +228,6 @@ fn shell_syntax_regressions() {
     ] {
         assert_eq!(parser::commands(command), expected, "{command}");
     }
-    assert_eq!(
-        parser::overrides("run_command", &json!({"CommandLine":"A=1"})),
-        ["command(A=1)"]
-    );
     for command in [
         "cat << EOF > file.txt\nline 1\nEOF",
         "cat << \"DELIM\" > file.txt\nline 2\nDELIM",
@@ -261,24 +238,6 @@ fn shell_syntax_regressions() {
     }
     assert_eq!(parser::clean("echo (foo)"), "echo (foo)");
     assert!(parser::commands("").is_empty());
-    for (command, grant) in [
-        ("gh", "command(gh)"),
-        ("gh --help", "command(gh)"),
-        ("gh pr --help", "command(gh pr)"),
-        ("gh run view 123 --log", "command(gh run view)"),
-    ] {
-        assert_eq!(
-            parser::overrides("run_command", &json!({"CommandLine":command})),
-            [grant]
-        );
-    }
-    for tool in ["write_to_file", "replace_file_content", "edit_file"] {
-        assert_eq!(
-            parser::overrides(tool, &json!({"target_file":"/tmp/file"})),
-            ["file(/tmp/file)"]
-        );
-        assert!(parser::overrides(tool, &json!({})).is_empty());
-    }
 }
 
 #[test]

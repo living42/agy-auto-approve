@@ -203,10 +203,7 @@ done
     for _ in 0..2 {
         let out = s.hook(&payload("git status && gh pr list"));
         assert_eq!(out["decision"], "allow", "{out}");
-        assert_eq!(
-            out["permissionOverrides"],
-            json!(["command(git status)", "command(gh pr list)"])
-        );
+        assert!(out.get("permissionOverrides").is_none());
     }
     assert_eq!(
         fs::read_to_string(s.dir.path().join("calls")).unwrap(),
