@@ -152,6 +152,7 @@ The payload must contain `toolCall.name` as a string and `toolCall.args` as an o
 | `AGY_AUTO_APPROVE_LOG_DIR` | Log directory; `~/.gemini/agy-auto-approve`. |
 | `AGY_AUTO_APPROVE_SILENT` | Set to `1` to suppress approval notices on stderr; structured logs remain enabled. |
 | `AGY_AUTO_APPROVE_PROMPT` | Override the reviewer prompt. |
+| `AGY_AUTO_APPROVE_TIMEOUT` | Evaluation turn timeout in seconds; defaults to `120`. |
 
 When a nonempty log directory is explicitly configured and no nonempty state directory is set, state is stored in the log directory's `state/` subdirectory.
 

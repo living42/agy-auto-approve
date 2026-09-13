@@ -244,7 +244,7 @@ impl ReviewerWorker {
         let mut stdout = BufReader::new(stdout_raw).lines();
 
         // Read the initial "init" event from agy to capture the reviewer conversation ID.
-        let reviewer_cid = tokio::time::timeout(Duration::from_secs(10), async {
+        let reviewer_cid = tokio::time::timeout(Duration::from_secs(30), async {
             while let Some(line) = stdout.next_line().await? {
                 if let Ok(data) = serde_json::from_str::<Value>(&line) {
                     if data["event"] == "init"
@@ -313,7 +313,7 @@ impl ReviewerWorker {
             .context("Cannot flush reviewer stdin")?;
 
         let started = Instant::now();
-        let deadline = Duration::from_secs(45);
+        let deadline = Duration::from_secs(config::eval_timeout());
 
         let assessment = tokio::time::timeout(deadline, async {
             let mut accumulated_response = String::new();

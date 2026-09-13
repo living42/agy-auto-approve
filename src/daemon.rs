@@ -140,7 +140,8 @@ pub async fn review_traced(payload: &Value, id: &str) -> Result<Assessment> {
         "workspacePaths": payload["workspacePaths"],
         "conversationId": payload.get("conversationId").or_else(|| payload.get("conversation_id")),
     });
-    let v = request(&config::socket_path(), &req, 50).await?;
+    let timeout_secs = config::eval_timeout() + 10;
+    let v = request(&config::socket_path(), &req, timeout_secs).await?;
     let a: Assessment =
         serde_json::from_value(v["assessment"].clone()).context("Invalid daemon assessment")?;
     if !matches!(a.outcome.as_str(), "allow" | "deny" | "ask" | "force_ask") {
@@ -217,7 +218,8 @@ async fn handle(stream: UnixStream, state: Arc<State>) {
 
                 let evaluation = match prepared {
                     Ok((worker_arc, action_json, source_cid)) => {
-                        let eval_result = tokio::time::timeout(Duration::from_secs(48), async {
+                        let eval_timeout = Duration::from_secs(config::eval_timeout() + 5);
+                        let eval_result = tokio::time::timeout(eval_timeout, async {
                             let mut worker = worker_arc.lock().await;
                             worker.evaluate_turn(&action_json, &id).await
                         })

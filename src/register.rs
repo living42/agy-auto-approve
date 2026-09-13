@@ -47,7 +47,7 @@ pub fn register(cli_only: bool, desktop_only: bool) -> Result<()> {
             "enabled": true,
             "PreToolUse": [{
                 "matcher": "*",
-                "hooks": [{"type": "command", "command": format!("{quoted} hook"), "timeout": 60}]
+                "hooks": [{"type": "command", "command": format!("{quoted} hook"), "timeout": 180}]
             }],
             "PostToolUse": [{
                 "matcher": "*",

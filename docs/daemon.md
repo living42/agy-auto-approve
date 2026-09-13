@@ -8,7 +8,7 @@
 |                                                                                   |
 |   +-----------------------+                         +-------------------------+   |
 |   |  PreToolUse Hook      |                         |   PostToolUse Hook      |   |
-|   |  (timeout: 60s)       |                         |   (timeout: 60s)        |   |
+|   |  (timeout: 180s)      |                         |   (timeout: 60s)        |   |
 |   +-----------+-----------+                         +------------+------------+   |
 +---------------|--------------------------------------------------|----------------+
                 |                                                  |
@@ -30,7 +30,8 @@
 |                                                                                   |
 |   * Evaluates proposed tool execution against prompt                              |
 |   * Strict pure-reasoning evaluator (all tool execution forbidden)                |
-|   * Emits structured evaluation matching GUARDIAN_OUTPUT_SCHEMA                    |
+|   * Emits structured evaluation matching GUARDIAN_OUTPUT_SCHEMA                   |
+|   * Configurable evaluation timeout (default: 120s)                               |
 +-----------------------------------------------------------------------------------+
 ```
 
@@ -47,7 +48,7 @@ The legacy sidecar approach (`sidecars` in `config.json`) was replaced to ensure
     "enabled": true,
     "PreToolUse": [{
       "matcher": "*",
-      "hooks": [{"type": "command", "command": "'~/.local/bin/agy-auto-approve' hook", "timeout": 60}]
+      "hooks": [{"type": "command", "command": "'~/.local/bin/agy-auto-approve' hook", "timeout": 180}]
     }],
     "PostToolUse": [{
       "matcher": "*",
@@ -57,7 +58,7 @@ The legacy sidecar approach (`sidecars` in `config.json`) was replaced to ensure
 }
 ```
 
-- **PreToolUse (`hook`)**: Intercepts tool calls. Evaluates allowlist fast path (read-only tools), blocklist (dangerous commands), circuit breaker state, or dispatches to the background daemon.
+- **PreToolUse (`hook`)**: Intercepts tool calls. Evaluates allowlist fast path (read-only tools, workspace file modifications), blocklist (dangerous commands), circuit breaker state, or dispatches to the background daemon.
 - **PostToolUse (`post-hook`)**: Detects completed tool executions. If the tool call was approved by user confirmation after a tripped circuit breaker, the breaker is automatically reset.
 
 ---

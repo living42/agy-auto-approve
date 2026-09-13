@@ -110,3 +110,16 @@ pub fn model_and_effort() -> (String, String) {
         setting("effort", "medium"),
     )
 }
+
+/// Return evaluation timeout in seconds for reviewer LLM evaluations.
+///
+/// Responsibility:
+/// Read the evaluation timeout setting with fallback to 120 seconds.
+///
+/// How it works:
+/// Reads `AGY_AUTO_APPROVE_TIMEOUT` from environment, then checks
+/// `.agents/agy-auto-approve-timeout.txt` and `~/.gemini/config/agy-auto-approve-timeout.txt`.
+/// Falls back to 120 seconds when unset or invalid.
+pub fn eval_timeout() -> u64 {
+    setting("timeout", "120").parse::<u64>().unwrap_or(120)
+}

@@ -1,6 +1,8 @@
 use agy_auto_approve::{
     config, parser,
-    pipeline::{ConversationState, blacklist, read_only},
+    pipeline::{
+        ConversationState, blacklist, is_subpath, is_workspace_edit, normalize_path, read_only,
+    },
     reviewer::{ReviewerPool, parse},
 };
 use serde_json::json;
@@ -297,5 +299,186 @@ fn reviewer_pool_reclaim_and_flush_and_status() {
 
     unsafe {
         std::env::remove_var("AGY_APPROVER_STATE_DIR");
+    }
+}
+
+#[test]
+fn path_normalization_and_subpath() {
+    use std::path::Path;
+
+    let p = normalize_path(Path::new("/a/b/../c/./d"));
+    assert_eq!(p, std::path::PathBuf::from("/a/c/d"));
+
+    let base = Path::new("/workspace/project");
+    assert!(is_subpath(
+        Path::new("/workspace/project/src/main.rs"),
+        base
+    ));
+    assert!(is_subpath(
+        Path::new("/workspace/project/sub/dir/file.txt"),
+        base
+    ));
+    assert!(is_subpath(Path::new("/workspace/project"), base));
+
+    // Traversal escaping base directory
+    assert!(!is_subpath(
+        Path::new("/workspace/project/../../etc/passwd"),
+        base
+    ));
+    assert!(!is_subpath(Path::new("/workspace/other"), base));
+    assert!(!is_subpath(Path::new("/etc/hosts"), base));
+}
+
+#[test]
+fn workspace_file_edit_whitelist() {
+    let ws = "/Users/test/workspace/myproject";
+    let artifact_dir = "/Users/test/.gemini/antigravity-cli/brain/conv-123";
+
+    // 1. write_to_file in workspace -> allowed
+    let payload = json!({
+        "toolCall": {
+            "name": "write_to_file",
+            "args": {
+                "TargetFile": format!("{ws}/src/lib.rs")
+            }
+        },
+        "workspacePaths": [ws]
+    });
+    assert!(is_workspace_edit(&payload));
+
+    // 2. replace_file_content in nested workspace folder -> allowed
+    let payload = json!({
+        "toolCall": {
+            "name": "replace_file_content",
+            "args": {
+                "TargetFile": format!("{ws}/tests/sub/test.rs")
+            }
+        },
+        "workspacePaths": [ws]
+    });
+    assert!(is_workspace_edit(&payload));
+
+    // 3. edit_file and apply_patch with target_file / path variations -> allowed
+    let payload = json!({
+        "toolCall": {
+            "name": "edit_file",
+            "args": {
+                "target_file": format!("{ws}/README.md")
+            }
+        },
+        "workspacePaths": [ws]
+    });
+    assert!(is_workspace_edit(&payload));
+
+    let payload = json!({
+        "toolCall": {
+            "name": "apply_patch",
+            "args": {
+                "FilePath": format!("{ws}/Cargo.toml")
+            }
+        },
+        "workspacePaths": [ws]
+    });
+    assert!(is_workspace_edit(&payload));
+
+    // 4. write_to_file in artifactDirectoryPath -> allowed
+    let payload = json!({
+        "toolCall": {
+            "name": "write_to_file",
+            "args": {
+                "TargetFile": format!("{artifact_dir}/plan.md")
+            }
+        },
+        "workspacePaths": [ws],
+        "artifactDirectoryPath": artifact_dir
+    });
+    assert!(is_workspace_edit(&payload));
+
+    // 5. Relative target path inside workspace -> allowed
+    let payload = json!({
+        "toolCall": {
+            "name": "write_to_file",
+            "args": {
+                "TargetFile": "src/new_module.rs"
+            }
+        },
+        "workspacePaths": [ws]
+    });
+    assert!(is_workspace_edit(&payload));
+
+    // 6. Path traversal attempting escape -> rejected
+    let payload = json!({
+        "toolCall": {
+            "name": "write_to_file",
+            "args": {
+                "TargetFile": format!("{ws}/../../etc/passwd")
+            }
+        },
+        "workspacePaths": [ws]
+    });
+    assert!(!is_workspace_edit(&payload));
+
+    // 7. Directly targeting .git directory -> rejected
+    let payload = json!({
+        "toolCall": {
+            "name": "write_to_file",
+            "args": {
+                "TargetFile": format!("{ws}/.git/hooks/pre-commit")
+            }
+        },
+        "workspacePaths": [ws]
+    });
+    assert!(!is_workspace_edit(&payload));
+
+    let payload = json!({
+        "toolCall": {
+            "name": "replace_file_content",
+            "args": {
+                "TargetFile": format!("{ws}/.git/config")
+            }
+        },
+        "workspacePaths": [ws]
+    });
+    assert!(!is_workspace_edit(&payload));
+
+    // 8. File modification outside workspace -> rejected
+    let payload = json!({
+        "toolCall": {
+            "name": "write_to_file",
+            "args": {
+                "TargetFile": "/etc/hosts"
+            }
+        },
+        "workspacePaths": [ws]
+    });
+    assert!(!is_workspace_edit(&payload));
+
+    // 9. Non-edit tools -> rejected
+    let payload = json!({
+        "toolCall": {
+            "name": "run_command",
+            "args": {
+                "CommandLine": "echo hello"
+            }
+        },
+        "workspacePaths": [ws]
+    });
+    assert!(!is_workspace_edit(&payload));
+}
+
+#[test]
+fn eval_timeout_configuration() {
+    unsafe {
+        std::env::remove_var("AGY_AUTO_APPROVE_TIMEOUT");
+    }
+    assert_eq!(config::eval_timeout(), 120);
+
+    unsafe {
+        std::env::set_var("AGY_AUTO_APPROVE_TIMEOUT", "90");
+    }
+    assert_eq!(config::eval_timeout(), 90);
+
+    unsafe {
+        std::env::remove_var("AGY_AUTO_APPROVE_TIMEOUT");
     }
 }

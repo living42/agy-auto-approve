@@ -62,6 +62,165 @@ pub fn read_only(tool: &str) -> bool {
     )
 }
 
+/// Normalize path components lexically without accessing the filesystem.
+///
+/// Responsibility:
+/// Resolves `.` and `..` components to prevent directory traversal escapes.
+///
+/// How it works:
+/// Iterates over path components: ignores `CurDir`, pops on `ParentDir`, and pushes normal components.
+pub fn normalize_path(path: &Path) -> PathBuf {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                components.pop();
+            }
+            c => components.push(c),
+        }
+    }
+    components.into_iter().collect()
+}
+
+/// Canonicalize an existing path or the longest existing ancestor path.
+///
+/// Responsibility:
+/// Resolves symlinks (such as macOS `/var` -> `/private/var`) for both existing
+/// and not-yet-created files.
+///
+/// How it works:
+/// If the path exists on disk, returns `path.canonicalize()`. Otherwise, walks up
+/// parent directories until an existing ancestor directory is found, canonicalizes
+/// that ancestor, and appends the non-existing child path components.
+pub fn canonicalize_with_ancestor(path: &Path) -> PathBuf {
+    if let Ok(c) = path.canonicalize() {
+        return c;
+    }
+    let mut ancestor = path;
+    let mut tail = Vec::new();
+    while let Some(parent) = ancestor.parent() {
+        if let Some(file_name) = ancestor.file_name() {
+            tail.push(file_name);
+        }
+        if let Ok(canon_parent) = parent.canonicalize() {
+            let mut res = canon_parent;
+            for part in tail.into_iter().rev() {
+                res.push(part);
+            }
+            return res;
+        }
+        ancestor = parent;
+    }
+    path.to_path_buf()
+}
+
+/// Determine whether `target` is contained within `base` directory.
+///
+/// Responsibility:
+/// Safely verifies that a file path resides inside an allowed directory root.
+///
+/// How it works:
+/// 1. Checks if lexical `normalize_path(target)` starts with `normalize_path(base)`.
+/// 2. If false, resolves symlinks using `canonicalize_with_ancestor` and checks
+///    if canonicalized target starts with canonicalized base.
+pub fn is_subpath(target: &Path, base: &Path) -> bool {
+    let norm_target = normalize_path(target);
+    let norm_base = normalize_path(base);
+    if norm_target.starts_with(&norm_base) {
+        return true;
+    }
+    if let Ok(canon_base) = base.canonicalize() {
+        let canon_target = canonicalize_with_ancestor(&norm_target);
+        if canon_target.starts_with(&canon_base) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Determine whether a tool call is an authorized file edit within the workspace.
+///
+/// Responsibility:
+/// Identifies file-modifying tools (`write_to_file`, `replace_file_content`, `edit_file`, `apply_patch`)
+/// whose target file resides inside the active workspace or artifact directories.
+///
+/// How it works:
+/// 1. Checks if the tool name matches file editing tools.
+/// 2. Extracts the target file path from tool arguments.
+/// 3. Rejects any target path targeting `.git` metadata or hooks.
+/// 4. Resolves relative target paths against workspace roots.
+/// 5. Verifies the target path is inside `workspacePaths`, `artifactDirectoryPath`, or `extract_project`.
+pub fn is_workspace_edit(payload: &Value) -> bool {
+    let tool = payload["toolCall"]["name"].as_str().unwrap_or("");
+    if !matches!(
+        tool,
+        "write_to_file" | "replace_file_content" | "edit_file" | "apply_patch"
+    ) {
+        return false;
+    }
+
+    let args = &payload["toolCall"]["args"];
+    let target_str = args["TargetFile"]
+        .as_str()
+        .or_else(|| args["target_file"].as_str())
+        .or_else(|| args["FilePath"].as_str())
+        .or_else(|| args["file_path"].as_str())
+        .or_else(|| args["Path"].as_str())
+        .or_else(|| args["path"].as_str())
+        .unwrap_or("")
+        .trim();
+
+    if target_str.is_empty() {
+        return false;
+    }
+
+    let target_path = Path::new(target_str);
+    let norm_target = normalize_path(target_path);
+
+    // Never auto-approve direct modifications to .git metadata or hooks.
+    if norm_target.components().any(|c| c.as_os_str() == ".git") {
+        return false;
+    }
+
+    let mut roots = Vec::new();
+    if let Some(ws) = payload["workspacePaths"].as_array() {
+        for p in ws
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            roots.push(PathBuf::from(p));
+        }
+    }
+    if let Some(artifact_dir) = payload["artifactDirectoryPath"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+    {
+        roots.push(PathBuf::from(artifact_dir));
+    }
+    let project = extract_project(payload);
+    if !project.is_empty() {
+        let p = PathBuf::from(project);
+        if !roots.contains(&p) {
+            roots.push(p);
+        }
+    }
+
+    for root in &roots {
+        let full_target = if target_path.is_relative() {
+            root.join(target_path)
+        } else {
+            target_path.to_path_buf()
+        };
+        if is_subpath(&full_target, root) {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Unified per-conversation state management.
 /// Manages circuit breaker thresholds, reviewer conversation IDs, and target project paths.
 /// Stored at ~/.gemini/agy-auto-approve/state/<source_cid>.json.
@@ -384,6 +543,16 @@ async fn evaluate_inner(payload: &Value, id: &str, stage: &mut &'static str) -> 
             );
         }
     }
+
+    if is_workspace_edit(payload) {
+        *stage = "whitelist";
+        return result(
+            "allow",
+            "Workspace file modification automatically approved.",
+            tool,
+        );
+    }
+
     if tool == "run_command"
         && let Some(reason) = blacklist(args["CommandLine"].as_str().unwrap_or(""))
     {
