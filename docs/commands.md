@@ -1,7 +1,7 @@
 # Command reference
 
 Complete command and option reference for `agy-auto-approve` and its installation commands.
-AI reviews require the host's `agentapi` command and an active login.
+AI reviews use background `agy` CLI processes running in sandboxed, pure-reasoning mode.
 
 ## Installation
 
@@ -27,15 +27,13 @@ existing binary unchanged. The executable directory must be writable.
 Cargo failures are reported without falling back to Release downloads.
 Cargo Git and local-path installation sources are unsupported.
 
-After upgrading, the new executable refreshes only the currently enabled CLI
-hook and/or Desktop sidecar. Existing configurations from older versions are
-recognized; disabled or missing integrations remain unchanged. If neither is
-enabled, run `install` to enable the plugin. Configuration refresh failures are
+After upgrading, the new executable refreshes the lifecycle hooks.
+Existing configurations from older versions are recognized.
+If hooks are missing, run `install` to enable them. Configuration refresh failures are
 reported separately from the completed binary upgrade.
 
-A running daemon is stopped after the upgrade; the CLI starts the new version
-on its next AI review request. Restart Antigravity Desktop when its sidecar is
-enabled. A failed daemon stop is reported and may require a manual restart.
+A running daemon is stopped after the upgrade; the hooks start the new version
+on its next AI review request.
 
 ## Help and version
 
@@ -46,6 +44,7 @@ agy-auto-approve help logs
 agy-auto-approve logs --help
 agy-auto-approve logs show --help
 agy-auto-approve daemon --help
+agy-auto-approve daemon flush --help
 agy-auto-approve daemon run --help
 agy-auto-approve install --help
 agy-auto-approve update --help
@@ -57,12 +56,12 @@ Use `-h` as a short form of `--help`, or `-V` for `--version` on the top-level c
 ## Plugin installation
 
 ```bash
-agy-auto-approve install                 # Register CLI hooks and Desktop sidecar
+agy-auto-approve install                 # Register lifecycle hooks (PreToolUse and PostToolUse)
 agy-auto-approve install --cli-only      # Register CLI hooks only
-agy-auto-approve install --desktop-only  # Register Desktop sidecar only
+agy-auto-approve install --desktop-only  # Register Desktop hooks only
 ```
 
-Installation preserves unrelated settings and updates existing hooks. CLI registration writes `~/.gemini/config/hooks.json` and adds development command permissions to existing CLI settings. Desktop registration deploys and enables the sidecar. The two options are mutually exclusive.
+Installation preserves unrelated settings and updates existing hooks. Both CLI and Desktop registration write `~/.gemini/config/hooks.json` and clean up any legacy sidecar manifests. CLI registration also adds development command permissions to existing CLI settings.
 
 Installation uses the executable's absolute path. If you move it, run `install` again.
 
@@ -70,19 +69,23 @@ Installation uses the executable's absolute path. If you move it, run `install` 
 
 ```bash
 agy-auto-approve daemon start                 # Start in the background
-agy-auto-approve daemon status                # Inspect the current daemon
+agy-auto-approve daemon status                # Inspect daemon and tracked conversations
+agy-auto-approve daemon status --json         # Inspect status as JSON
+agy-auto-approve daemon flush                 # Force terminate all active reviewer processes
 agy-auto-approve daemon stop                  # Stop and wait for socket cleanup
 agy-auto-approve daemon run                   # Run in the foreground
 agy-auto-approve daemon run --idle-timeout 0   # Disable idle shutdown
 ```
 
-`start` returns the existing daemon's status if it is already running. CLI hooks automatically start the daemon when an AI review is needed.
+`start` returns the existing daemon's status if it is already running. Hooks automatically start the daemon when an AI review is needed.
 
-`status` does not start the daemon. It reports the PID, version, socket, uptime, and approval counts when running; it exits with code 1 when stopped. `start`, `status`, and `stop` write JSON to stdout and diagnostics to stderr.
+`status` does not start the daemon. It displays a formatted summary of the daemon PID, uptime, evaluation counts, and all tracked conversations with their source conversation ID, reviewer conversation ID, project path, and process state. Pass `--json` to output raw JSON.
+
+`flush` immediately terminates all running `agy` reviewer worker processes. Their state remains preserved on disk and will resume on demand.
 
 `run` is intended for foreground use or service managers. Its `--idle-timeout SECONDS` option defaults to `1800` (30 minutes); `0` disables idle shutdown.
 
-The default socket is `~/.gemini/antigravity-cli/approver.sock`.
+The default socket is `~/.gemini/agy-auto-approve/approver.sock`.
 
 ## Approval logs
 

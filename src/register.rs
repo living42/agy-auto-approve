@@ -2,6 +2,8 @@ use crate::config;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::{fs, path::Path};
+
+/// Read, update, and atomically save a JSON file.
 fn update(path: &Path, f: impl FnOnce(&mut Value) -> Result<()>) -> Result<()> {
     let mut data = match fs::read(path) {
         Ok(bytes) => serde_json::from_slice::<Value>(&bytes)
@@ -20,6 +22,8 @@ fn update(path: &Path, f: impl FnOnce(&mut Value) -> Result<()>) -> Result<()> {
     println!("Updated {}", path.display());
     Ok(())
 }
+
+/// Ensure a field in a JSON object exists as an object and return a mutable reference.
 fn object_field<'a>(v: &'a mut Value, key: &str) -> Result<&'a mut Value> {
     if v.get(key).is_none() {
         v[key] = json!({});
@@ -29,49 +33,75 @@ fn object_field<'a>(v: &'a mut Value, key: &str) -> Result<&'a mut Value> {
     }
     Ok(&mut v[key])
 }
+
+/// Register agy-auto-approve hooks and clean up legacy sidecars.
 pub fn register(cli_only: bool, desktop_only: bool) -> Result<()> {
     let exe = std::env::current_exe()?.canonicalize()?;
     let executable = exe.to_str().context("Executable path is not UTF-8")?;
     let quoted = format!("'{}'", executable.replace('\'', "'\"'\"'"));
     let base = config::home().join(".gemini/config");
-    if !desktop_only {
-        update(&base.join("hooks.json"), |v| {
-            v["agy-auto-approve"] = json!({"enabled":true,"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":format!("{quoted} hook"),"timeout":30}]}]});
+
+    // Register PreToolUse and PostToolUse lifecycle hooks.
+    update(&base.join("hooks.json"), |v| {
+        v["agy-auto-approve"] = json!({
+            "enabled": true,
+            "PreToolUse": [{
+                "matcher": "*",
+                "hooks": [{"type": "command", "command": format!("{quoted} hook"), "timeout": 60}]
+            }],
+            "PostToolUse": [{
+                "matcher": "*",
+                "hooks": [{"type": "command", "command": format!("{quoted} post-hook"), "timeout": 60}]
+            }]
+        });
+        Ok(())
+    })?;
+
+    // Configure CLI permissions in settings.json if present.
+    let settings = config::home().join(".gemini/antigravity-cli/settings.json");
+    if !desktop_only && settings.exists() {
+        update(&settings, |v| {
+            let permissions = object_field(v, "permissions")?;
+            if permissions.get("allow").is_none() {
+                permissions["allow"] = json!([]);
+            }
+            let allow = permissions["allow"]
+                .as_array_mut()
+                .context("permissions.allow must be an array")?;
+            for p in "gh npm npx yarn pnpm bun git python python3 pytest cargo go node make docker docker-compose curl cat echo ls mkdir cp touch grep find sh bash zsh head tail mise uv".split_whitespace() {
+                let grant = json!(format!("command({p})"));
+                if !allow.contains(&grant) {
+                    allow.push(grant);
+                }
+            }
+            allow.sort_by_key(Value::to_string);
             Ok(())
         })?;
-        let settings = config::home().join(".gemini/antigravity-cli/settings.json");
-        if settings.exists() {
-            update(&settings, |v| {
-                let permissions = object_field(v, "permissions")?;
-                if permissions.get("allow").is_none() {
-                    permissions["allow"] = json!([]);
-                }
-                let allow = permissions["allow"]
-                    .as_array_mut()
-                    .context("permissions.allow must be an array")?;
-                for p in "gh npm npx yarn pnpm bun git python python3 pytest cargo go node make docker docker-compose curl cat echo ls mkdir cp touch grep find sh bash zsh head tail mise uv".split_whitespace() {
-                    let grant = json!(format!("command({p})"));
-                    if !allow.contains(&grant) { allow.push(grant); }
-                }
-                allow.sort_by_key(Value::to_string);
-                Ok(())
-            })?;
-        }
     }
+
+    // Clean up legacy sidecars from config.json and delete sidecar manifests.
     if !cli_only {
-        update(&base.join("config.json"), |v| {
-            object_field(v, "sidecars")?["agy-auto-approve/approver"] = json!({"enabled":true});
-            Ok(())
-        })?;
+        let config_file = base.join("config.json");
+        if config_file.exists() {
+            let _ = update(&config_file, |v| {
+                if let Some(sidecars) = v.get_mut("sidecars").and_then(Value::as_object_mut) {
+                    sidecars.remove("agy-auto-approve/approver");
+                    sidecars.remove("approver");
+                }
+                Ok(())
+            });
+        }
         for relative in [
             "sidecars/approver/sidecar.json",
             "sidecars/agy-auto-approve/approver/sidecar.json",
         ] {
-            update(&base.join(relative), |v| {
-                *v = json!({"name":"approver","description":"Antigravity auto-approve daemon sidecar","command":executable,"args":["daemon","run"]});
-                Ok(())
-            })?;
+            let path = base.join(relative);
+            if path.exists() {
+                let _ = fs::remove_file(&path);
+                println!("Removed legacy sidecar manifest {}", path.display());
+            }
         }
     }
+
     Ok(())
 }

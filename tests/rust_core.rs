@@ -1,9 +1,10 @@
 use agy_auto_approve::{
-    parser,
-    pipeline::{Breaker, blacklist, read_only},
-    reviewer::parse,
+    config, parser,
+    pipeline::{ConversationState, blacklist, read_only},
+    reviewer::{ReviewerPool, parse},
 };
 use serde_json::json;
+use std::time::Duration;
 
 #[test]
 fn bash_and_permission_overrides() {
@@ -67,6 +68,7 @@ fn bash_and_permission_overrides() {
         )]
     );
 }
+
 #[test]
 fn deterministic_policies() {
     for cmd in [
@@ -95,6 +97,7 @@ fn deterministic_policies() {
     assert!(read_only("view_file"));
     assert!(!read_only("run_command"));
 }
+
 #[test]
 fn tolerant_review_fails_closed() {
     for raw in [
@@ -118,29 +121,74 @@ fn tolerant_review_fails_closed() {
     );
     assert_eq!(parse("{\"outcome\":\"force_ask\"}").outcome, "force_ask");
 }
+
 #[test]
-fn breaker_persistence_and_window() {
+fn unified_conversation_state_persistence() {
     let dir = tempfile::tempdir().unwrap();
+    let cid = "test_conversation_123";
     {
-        let mut b = Breaker::open(dir.path(), "session").unwrap();
+        let mut state = ConversationState::open(dir.path(), cid).unwrap();
+        assert_eq!(state.source_cid(), cid);
+        assert_eq!(state.consecutive_denials(), 0);
+        assert!(state.reviewer_cid().is_none());
+        assert_eq!(state.project(), "");
+
+        // Set metadata
+        state.set_reviewer_cid("rev-4f2a-8b1c").unwrap();
+        state.set_project("/Users/lizeqing/Code/project1").unwrap();
+
         for _ in 0..3 {
-            assert!(b.tripped().is_none());
-            b.record("deny").unwrap();
+            assert!(state.tripped().is_none());
+            state.record("deny").unwrap();
         }
-        assert!(b.tripped().is_some());
+        assert!(state.tripped().is_some());
     }
-    let mut b = Breaker::open(dir.path(), "session").unwrap();
+
+    // Verify file name has no cb_ prefix
+    let expected_file = dir.path().join(format!("{cid}.json"));
+    assert!(expected_file.exists());
+    assert!(!dir.path().join(format!("cb_{cid}.json")).exists());
+
+    // Reopen and check persisted state
+    let mut reopened = ConversationState::open(dir.path(), cid).unwrap();
+    assert!(reopened.tripped().is_some());
+    assert_eq!(reopened.reviewer_cid().as_deref(), Some("rev-4f2a-8b1c"));
+    assert_eq!(reopened.project(), "/Users/lizeqing/Code/project1");
+
+    reopened.record("allow").unwrap();
+    assert!(reopened.tripped().is_none());
+    assert_eq!(reopened.consecutive_denials(), 0);
+
+    reopened.record("deny").unwrap();
+    assert!(reopened.tripped().unwrap().contains("4/5"));
+}
+
+#[test]
+fn conversation_state_post_tool_use_reset() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut b = ConversationState::open(dir.path(), "session").unwrap();
+    for _ in 0..3 {
+        b.record("deny").unwrap();
+    }
     assert!(b.tripped().is_some());
-    b.record("allow").unwrap();
+
+    // Mark force ask awaiting approval for step 10
+    b.mark_force_ask(Some(10)).unwrap();
+    assert!(b.tripped().is_some());
+
+    // PostToolUse for unrelated step does not reset
+    assert!(!b.on_post_tool_use(Some(99)).unwrap());
+    assert!(b.tripped().is_some());
+
+    // PostToolUse for the approved step resets breaker
+    assert!(b.on_post_tool_use(Some(10)).unwrap());
     assert!(b.tripped().is_none());
-    b.record("deny").unwrap();
-    assert!(b.tripped().unwrap().contains("4/5"));
-    assert!(
-        Breaker::open(dir.path(), "other")
-            .unwrap()
-            .tripped()
-            .is_none()
-    );
+
+    drop(b);
+
+    // Persisted state also shows breaker is cleared
+    let b_reopened = ConversationState::open(dir.path(), "session").unwrap();
+    assert!(b_reopened.tripped().is_none());
 }
 
 #[test]
@@ -230,5 +278,65 @@ fn shell_syntax_regressions() {
             ["file(/tmp/file)"]
         );
         assert!(parser::overrides(tool, &json!({})).is_empty());
+    }
+}
+
+#[test]
+fn agy_bin_and_paths_resolution() {
+    unsafe {
+        std::env::set_var("AGY_BIN", "/custom/bin/agy");
+        std::env::set_var("AGY_AUTO_APPROVE_DIR", "/custom/base");
+        std::env::set_var("AGY_APPROVER_STATE_DIR", "/custom/base/state");
+        std::env::set_var("AGY_APPROVER_SOCKET", "/custom/base/approver.sock");
+    }
+
+    assert_eq!(
+        config::agy_bin(),
+        std::path::PathBuf::from("/custom/bin/agy")
+    );
+    assert_eq!(config::base_dir(), std::path::PathBuf::from("/custom/base"));
+    assert_eq!(config::log_dir(), std::path::PathBuf::from("/custom/base"));
+    assert_eq!(
+        config::state_dir(),
+        std::path::PathBuf::from("/custom/base/state")
+    );
+    assert_eq!(
+        config::socket_path(),
+        std::path::PathBuf::from("/custom/base/approver.sock")
+    );
+
+    unsafe {
+        std::env::remove_var("AGY_BIN");
+        std::env::remove_var("AGY_AUTO_APPROVE_DIR");
+        std::env::remove_var("AGY_APPROVER_STATE_DIR");
+        std::env::remove_var("AGY_APPROVER_SOCKET");
+    }
+}
+
+#[test]
+fn reviewer_pool_reclaim_and_flush_and_status() {
+    let mut pool = ReviewerPool::default();
+    assert_eq!(pool.flush_all(), 0);
+    assert_eq!(pool.reclaim_idle(Duration::from_secs(600)), 0);
+
+    // Test status snapshot reads state files
+    let dir = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("AGY_APPROVER_STATE_DIR", dir.path().to_str().unwrap());
+    }
+
+    let mut state1 = ConversationState::open(dir.path(), "conv_1").unwrap();
+    state1.set_project("/project/one").unwrap();
+    state1.set_reviewer_cid("rev-1").unwrap();
+
+    let snapshot = pool.status_snapshot();
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot[0].source_cid, "conv_1");
+    assert_eq!(snapshot[0].reviewer_cid.as_deref(), Some("rev-1"));
+    assert_eq!(snapshot[0].project, "/project/one");
+    assert!(snapshot[0].process_state.contains("Reclaimed"));
+
+    unsafe {
+        std::env::remove_var("AGY_APPROVER_STATE_DIR");
     }
 }

@@ -1,10 +1,8 @@
 # agy-auto-approve
 
-Automatic approval hooks and a persistent approval daemon for Antigravity CLI and Desktop, built as a single Rust executable. AI reviews use the host's `agentapi` command and require an active login.
+Automatic approval hooks and a persistent approval daemon for Antigravity CLI and Desktop, built as a single Rust executable. AI reviews use background `agy` CLI processes running in sandboxed, pure-reasoning mode.
 
-Reviewer subprocesses preserve the host's `PATH` and append
-`$HOME/.gemini/antigravity-cli/bin` as a fallback for CLI launches. Host-injected
-commands take priority. This lookup works on both macOS and Linux.
+Reviewer processes execute with their working directory in `~/.gemini/agy-auto-approve/state` and deny all tool calls. Per-conversation states are unified under `~/.gemini/agy-auto-approve/state/<source_cid>.json`.
 
 ## How it works
 
@@ -25,17 +23,17 @@ Antigravity CLI / Desktop
            | no
      Persistent daemon
            |
-     agentapi AI reviewer -------------> Allow / Deny
+     agy Reviewer Process -------------> Allow / Deny
            |
      Error or timeout -----------------> Deny
 ```
 
-The daemon reuses a reviewer session across requests, allowing the model service
-to reuse KV/prompt caches for shared context. Cache hits can reduce repeated
-processing and input-token costs, depending on the provider's caching and pricing.
+The daemon manages reviewer sessions per source conversation, allowing the model service
+to reuse KV/prompt caches for shared context. Reviewer processes idle for 10 minutes are
+automatically reclaimed while state is preserved on disk.
 Repeated AI-review denials trip the circuit breaker, requiring user review on
-subsequent requests. Decisions and reasons are logged locally. See the
-[pipeline details](docs/sidecars.md).
+subsequent requests. User approvals during PostToolUse automatically reset the breaker.
+Decisions and reasons are logged locally.
 
 ## Install
 
@@ -63,7 +61,7 @@ Or install from crates.io once the crate is published (requires Rust/Cargo and a
 cargo install agy-auto-approve --locked
 ```
 
-Then install the CLI hook and Desktop sidecar:
+Then install the lifecycle hooks:
 
 ```bash
 agy-auto-approve install
@@ -82,7 +80,7 @@ agy-auto-approve logs show APPROVAL_ID    # Show the full approval record
 
 Logs are stored in `~/.gemini/agy-auto-approve` and can be read without a running daemon.
 
-For all commands and options, see the [command reference](docs/commands.md). For more details, see the [approval architecture](docs/auto_approver_architecture.md) and [sidecar documentation](docs/sidecars.md).
+For all commands and options, see the [command reference](docs/commands.md). For more details, see the [daemon architecture](docs/daemon.md) and [policy background](docs/auto_approver_architecture.md).
 
 ## License
 

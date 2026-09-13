@@ -276,7 +276,7 @@ pub async fn update(version: Option<&str>) -> Result<()> {
         println!("CLI will start the new daemon on its next review request.");
     }
     if desktop {
-        println!("Restart Antigravity Desktop to load the updated sidecar.");
+        println!("Restart Antigravity Desktop to load the updated hook configuration.");
     }
     Ok(())
 }

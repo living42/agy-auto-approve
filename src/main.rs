@@ -10,10 +10,13 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 }
+
 #[derive(Subcommand)]
 enum Commands {
     /// Read a PreToolUse JSON payload on stdin; emit exactly one result on stdout.
     Hook,
+    /// Read a PostToolUse JSON payload on stdin; emit `{}` on stdout.
+    PostHook,
     /// List approval logs, or inspect the full input/output trace of one approval.
     #[command(args_conflicts_with_subcommands = true)]
     Logs {
@@ -44,7 +47,7 @@ enum Commands {
         #[arg(long)]
         version: Option<String>,
     },
-    /// Register this executable for CLI hooks and Desktop sidecars (both by default).
+    /// Register this executable for CLI and Desktop lifecycle hooks.
     Install {
         #[arg(long, conflicts_with = "desktop_only")]
         cli_only: bool,
@@ -52,21 +55,34 @@ enum Commands {
         desktop_only: bool,
     },
 }
+
 #[derive(Subcommand)]
 enum DaemonCommand {
+    /// Start the background approver daemon if not running.
     Start,
-    Status,
+    /// Inspect daemon status and list all tracked conversations.
+    Status {
+        /// Print status as raw JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Forcefully terminate all running background reviewer processes.
+    Flush,
+    /// Stop the background approver daemon.
     Stop,
+    /// Run the daemon in foreground.
     Run {
         #[arg(long, default_value_t = 1800)]
         idle_timeout: u64,
     },
 }
+
 #[derive(Subcommand)]
 enum LogsCommand {
-    /// Show all recorded events for an exact approval ID, including agentapi input/output.
+    /// Show all recorded events for an exact approval ID, including reviewer input/output.
     Show { id: String },
 }
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     match Cli::parse().command {
@@ -78,32 +94,78 @@ async fn main() -> Result<()> {
                 .ok()
                 .filter(|_| bytes.len() <= 1024 * 1024)
                 .and_then(|_| serde_json::from_slice::<Value>(&bytes).ok())
-                .filter(|v| {
-                    v.is_object()
-                        && v["toolCall"].is_object()
-                        && v["toolCall"]["name"].is_string()
-                        && v["toolCall"]["args"].is_object()
-                });
+                .filter(Value::is_object);
             let result = match parsed {
-                Some(payload) => pipeline::evaluate(&payload).await,
+                Some(payload)
+                    if payload["toolCall"].is_object()
+                        && payload["toolCall"]["name"].is_string()
+                        && payload["toolCall"]["args"].is_object() =>
+                {
+                    pipeline::evaluate(&payload).await
+                }
+                Some(payload)
+                    if payload.get("toolCall").is_none() || payload["toolCall"].is_null() =>
+                {
+                    pipeline::post_evaluate(&payload).await
+                }
+                Some(payload) => {
+                    let id = audit::request_id();
+                    audit::record(&id, "hook_input", json!({"invalid_payload": payload}));
+                    let output =
+                        pipeline::result("ask", "Failed to parse hook stdin payload.", "", None);
+                    audit::record(
+                        &id,
+                        "hook_result",
+                        json!({
+                            "tool": "",
+                            "conversation_id": "default",
+                            "stage": "invalid_input",
+                            "output": output,
+                            "duration_ms": 0,
+                        }),
+                    );
+                    output
+                }
                 None => {
                     let id = audit::request_id();
                     audit::record(
                         &id,
                         "hook_input",
-                        json!({"raw_input":String::from_utf8_lossy(&bytes),
-                        "truncated":bytes.len() > 1024*1024}),
+                        json!({
+                            "raw_input": String::from_utf8_lossy(&bytes),
+                            "truncated": bytes.len() > 1024 * 1024,
+                        }),
                     );
                     let output =
                         pipeline::result("ask", "Failed to parse hook stdin payload.", "", None);
                     audit::record(
                         &id,
                         "hook_result",
-                        json!({"tool":"", "conversation_id":"default",
-                        "stage":"invalid_input", "output":output, "duration_ms":0}),
+                        json!({
+                            "tool": "",
+                            "conversation_id": "default",
+                            "stage": "invalid_input",
+                            "output": output,
+                            "duration_ms": 0,
+                        }),
                     );
                     output
                 }
+            };
+            println!("{result}");
+        }
+        Commands::PostHook => {
+            let mut bytes = Vec::new();
+            let parsed = std::io::stdin()
+                .take(1024 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .ok()
+                .filter(|_| bytes.len() <= 1024 * 1024)
+                .and_then(|_| serde_json::from_slice::<Value>(&bytes).ok())
+                .filter(Value::is_object);
+            let result = match parsed {
+                Some(payload) => pipeline::post_evaluate(&payload).await,
+                None => json!({}),
             };
             println!("{result}");
         }
@@ -141,29 +203,90 @@ async fn main() -> Result<()> {
         Commands::Daemon { command } => match command {
             DaemonCommand::Run { idle_timeout } => daemon::run(idle_timeout).await?,
             DaemonCommand::Start => println!("{}", daemon::start().await?),
-            DaemonCommand::Status => {
-                match daemon::request(&config::socket_path(), &json!({"action":"status"}), 1).await
+            DaemonCommand::Flush => {
+                let v =
+                    daemon::request(&config::socket_path(), &json!({"action": "flush"}), 5).await?;
+                let count = v["flushed_count"].as_u64().unwrap_or(0);
+                println!("Flushed {count} active reviewer process(es).");
+            }
+            DaemonCommand::Status { json } => {
+                match daemon::request(&config::socket_path(), &json!({"action": "status"}), 3).await
                 {
-                    Ok(v) if v["status"] == "running" => println!("{v}"),
+                    Ok(v) if v["status"] == "running" => {
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&v)?);
+                        } else {
+                            let pid = v["pid"].as_u64().unwrap_or(0);
+                            let uptime = v["uptime_seconds"].as_u64().unwrap_or(0);
+                            let evals = v["evaluations"].as_u64().unwrap_or(0);
+                            let active_evals = v["active_evaluations"].as_u64().unwrap_or(0);
+
+                            println!("Approver Daemon: running (PID {pid}, uptime {uptime}s)");
+                            println!("Evaluations:     {evals} (active: {active_evals})");
+                            println!("Socket:          {}", config::socket_path().display());
+                            println!();
+                            println!("Tracked Conversations:");
+
+                            if let Some(convs) = v["conversations"].as_array() {
+                                if convs.is_empty() {
+                                    println!("  (No conversations tracked yet)");
+                                } else {
+                                    for conv in convs {
+                                        let scid = conv["source_cid"].as_str().unwrap_or("-");
+                                        let rcid =
+                                            conv["reviewer_cid"].as_str().unwrap_or("(none)");
+                                        let project = conv["project"].as_str().unwrap_or("(none)");
+                                        let state = conv["process_state"].as_str().unwrap_or("-");
+
+                                        println!("- Source CID:   {scid}");
+                                        println!("  Reviewer CID: {rcid}");
+                                        println!("  Project:      {project}");
+                                        println!("  Process:      {state}");
+                                        println!();
+                                    }
+                                }
+                            }
+                        }
+                    }
                     _ => {
-                        println!(
-                            "{}",
-                            json!({"status":"stopped","socket":config::socket_path()})
-                        );
+                        if json {
+                            println!(
+                                "{}",
+                                json!({"status": "stopped", "socket": config::socket_path()})
+                            );
+                        } else {
+                            println!(
+                                "Approver Daemon: stopped (socket: {})",
+                                config::socket_path().display()
+                            );
+                        }
                         std::process::exit(1);
                     }
                 }
             }
             DaemonCommand::Stop => {
                 let v =
-                    daemon::request(&config::socket_path(), &json!({"action":"stop"}), 1).await?;
+                    daemon::request(&config::socket_path(), &json!({"action": "stop"}), 1).await?;
                 if v["status"] != "stopping" {
                     bail!("Unexpected stop response: {v}");
                 }
-                for _ in 0..100 {
+                for _ in 0..150 {
                     if !config::socket_path().exists() {
-                        println!("{}", json!({"status":"stopped"}));
-                        return Ok(());
+                        use fs2::FileExt;
+                        let lock_path = config::socket_path().with_extension("sock.lock");
+                        if let Ok(file) = std::fs::OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .open(&lock_path)
+                        {
+                            if file.try_lock_exclusive().is_ok() {
+                                println!("{}", json!({"status": "stopped"}));
+                                return Ok(());
+                            }
+                        } else {
+                            println!("{}", json!({"status": "stopped"}));
+                            return Ok(());
+                        }
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                 }

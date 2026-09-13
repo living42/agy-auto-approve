@@ -3,7 +3,11 @@
     "enabled": true,
     "PreToolUse": [{
       "matcher": "*",
-      "hooks": [{"type": "command", "command": "agy-auto-approve hook", "timeout": 30}]
+      "hooks": [{"type": "command", "command": "agy-auto-approve hook", "timeout": 60}]
+    }],
+    "PostToolUse": [{
+      "matcher": "*",
+      "hooks": [{"type": "command", "command": "agy-auto-approve post-hook", "timeout": 60}]
     }]
   }
 }
