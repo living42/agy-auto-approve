@@ -39,7 +39,10 @@
 
 ## 1. Unified Lifecycle Hooks
 
-Both Desktop and CLI use Antigravity lifecycle hooks configured in `~/.gemini/config/hooks.json`.
+Both Desktop and CLI use Antigravity lifecycle hooks loaded from their respective global plugin directories:
+- CLI: `~/.gemini/antigravity-cli/plugins/agy-auto-approve/hooks.json`
+- Desktop: `~/.gemini/config/plugins/agy-auto-approve/hooks.json`
+
 The legacy sidecar approach (`sidecars` in `config.json`) was replaced to ensure identical behavior across Desktop and CLI without depending on internal host sidecar lifecycles.
 
 ```json
@@ -143,5 +146,5 @@ agy-auto-approve logs -f                      # Live stream approvals
 agy-auto-approve logs show <id>               # Detailed trace including LLM exchange
 
 # Installation
-agy-auto-approve install                      # Register hooks in ~/.gemini/config/hooks.json
+agy-auto-approve install                      # Install plugin via 'agy plugin install'
 ```

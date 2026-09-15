@@ -57,13 +57,20 @@ Use `-h` as a short form of `--help`, or `-V` for `--version` on the top-level c
 
 ```bash
 agy-auto-approve install                 # Register lifecycle hooks (PreToolUse and PostToolUse)
-agy-auto-approve install --cli-only      # Register CLI hooks only
-agy-auto-approve install --desktop-only  # Register Desktop hooks only
+agy-auto-approve install --cli-only      # Register plugin and configure CLI development permissions only
+agy-auto-approve install --desktop-only  # Register plugin without modifying CLI development permissions
 ```
 
-Installation preserves unrelated settings and updates existing hooks. Both CLI and Desktop registration write `~/.gemini/config/hooks.json` and clean up any legacy sidecar manifests. CLI registration also adds development command permissions to existing CLI settings.
+Installation preserves unrelated settings. It installs the plugin by executing `agy plugin install` from a staged directory containing `plugin.json` and `hooks.json`. This registers `agy-auto-approve` in `~/.gemini/config/import_manifest.json` and stages it into `~/.gemini/config/plugins/agy-auto-approve/` for both CLI and Desktop environments.
 
-Installation uses the executable's absolute path. If you move it, run `install` again.
+Pass `--cli-only` or `--desktop-only` to control surface configuration:
+- `--cli-only`: registers the plugin and grants development command permissions in `~/.gemini/antigravity-cli/settings.json`.
+- `--desktop-only`: registers the plugin without modifying CLI development permissions in `settings.json`.
+- Default (`agy-auto-approve install`): registers the plugin globally, grants CLI development permissions if settings exist, and cleans up any legacy sidecar manifests.
+
+If `~/.gemini/config/hooks.json` contains an older `agy-auto-approve` entry, installation removes it to prevent duplicate hook execution.
+
+Installation requires the `agy` CLI binary to be present in PATH or standard install paths. Installation uses the executable's absolute path. If you move it, run `install` again.
 
 ## Daemon
 

@@ -40,10 +40,11 @@ timeout: 120
 #   regex:<pattern>      - Evaluates regular expression
 #
 # Evaluation Precedence:
-#   Deny rules always evaluate before Allow rules (Deny > Allow).
-#   If an action matches Deny, the tool call is rejected immediately.
-#   If an action matches Allow, the tool call is approved immediately.
-#   If neither matches, the call proceeds to safety checks and LLM review.
+#   1. Deny rules always evaluate before Allow rules (Deny > Allow).
+#   2. If an action matches Deny, the tool call is rejected immediately.
+#   3. If an action matches Allow, the tool call is approved immediately.
+#   4. If neither matches, read_file and write_file under workspace are allowed by default.
+#   5. All other actions proceed to circuit breaker checks and AI reviewer daemon.
 
 # Deny List: Operations blocked immediately without LLM review
 deny:

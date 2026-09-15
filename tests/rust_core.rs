@@ -1,7 +1,7 @@
 use agy_auto_approve::{
     config, parser,
     pipeline::{
-        ConversationState, blacklist, is_subpath, is_workspace_edit, normalize_path, read_only,
+        ConversationState, is_subpath, is_workspace_edit, is_workspace_file_op, normalize_path,
     },
     reviewer::{ReviewerPool, parse},
 };
@@ -53,32 +53,70 @@ fn bash_command_parsing() {
 }
 
 #[test]
-fn deterministic_policies() {
-    for cmd in [
-        "rm -rf /",
-        "rm -rf /*",
-        "rm -rf ~",
-        "rm -rf /path/.git",
-        "mkfs.ext4 /dev/sda1",
-        ":(){ :|:& };:",
-        "echo $(rm -rf /)",
-        "(rm -rf /)",
-        "`rm -rf /`",
-        "echo $(rm -rf $HOME)",
+fn workspace_default_file_policies() {
+    let ws = "/Users/test/Code/project";
+
+    // Read operations under workspace -> allowed
+    for (tool, arg_key) in [
+        ("view_file", "AbsolutePath"),
+        ("read_file", "path"),
+        ("grep_search", "SearchPath"),
+        ("find_by_name", "SearchDirectory"),
+        ("list_dir", "DirectoryPath"),
     ] {
-        assert!(blacklist(cmd).is_some(), "{cmd}");
+        let payload = json!({
+            "toolCall": {
+                "name": tool,
+                "args": { arg_key: format!("{ws}/src/main.rs") }
+            },
+            "workspacePaths": [ws]
+        });
+        assert!(
+            is_workspace_file_op(&payload),
+            "tool {tool} should be allowed under workspace"
+        );
     }
-    for cmd in [
-        "ls -la",
-        "git status",
-        "cargo build",
-        "echo 'Hello world'",
-        "arm-none-eabi-gcc main.c",
+
+    // Write operations under workspace -> allowed
+    for (tool, arg_key) in [
+        ("write_to_file", "TargetFile"),
+        ("write_file", "path"),
+        ("replace_file_content", "TargetFile"),
+        ("edit_file", "target_file"),
+        ("apply_patch", "FilePath"),
     ] {
-        assert!(blacklist(cmd).is_none(), "{cmd}");
+        let payload = json!({
+            "toolCall": {
+                "name": tool,
+                "args": { arg_key: format!("{ws}/src/lib.rs") }
+            },
+            "workspacePaths": [ws]
+        });
+        assert!(
+            is_workspace_file_op(&payload),
+            "tool {tool} should be allowed under workspace"
+        );
     }
-    assert!(read_only("view_file"));
-    assert!(!read_only("run_command"));
+
+    // Non-file tools are not workspace file operations
+    for (tool, args) in [
+        ("run_command", json!({"CommandLine": "ls -la"})),
+        ("read_url_content", json!({"Url": "https://example.com"})),
+        ("search_web", json!({"query": "rust"})),
+        ("manage_task", json!({"Action": "list"})),
+    ] {
+        let payload = json!({
+            "toolCall": {
+                "name": tool,
+                "args": args
+            },
+            "workspacePaths": [ws]
+        });
+        assert!(
+            !is_workspace_file_op(&payload),
+            "tool {tool} should not be a workspace file op"
+        );
+    }
 }
 
 #[test]
@@ -345,6 +383,7 @@ fn workspace_file_edit_whitelist() {
         "workspacePaths": [ws]
     });
     assert!(is_workspace_edit(&payload));
+    assert!(is_workspace_file_op(&payload));
 
     // 2. replace_file_content in nested workspace folder -> allowed
     let payload = json!({
@@ -357,6 +396,7 @@ fn workspace_file_edit_whitelist() {
         "workspacePaths": [ws]
     });
     assert!(is_workspace_edit(&payload));
+    assert!(is_workspace_file_op(&payload));
 
     // 3. edit_file and apply_patch with target_file / path variations -> allowed
     let payload = json!({
@@ -369,6 +409,7 @@ fn workspace_file_edit_whitelist() {
         "workspacePaths": [ws]
     });
     assert!(is_workspace_edit(&payload));
+    assert!(is_workspace_file_op(&payload));
 
     let payload = json!({
         "toolCall": {
@@ -380,6 +421,7 @@ fn workspace_file_edit_whitelist() {
         "workspacePaths": [ws]
     });
     assert!(is_workspace_edit(&payload));
+    assert!(is_workspace_file_op(&payload));
 
     // 4. write_to_file in artifactDirectoryPath -> allowed
     let payload = json!({
@@ -393,6 +435,7 @@ fn workspace_file_edit_whitelist() {
         "artifactDirectoryPath": artifact_dir
     });
     assert!(is_workspace_edit(&payload));
+    assert!(is_workspace_file_op(&payload));
 
     // 5. Relative target path inside workspace -> allowed
     let payload = json!({
@@ -405,6 +448,7 @@ fn workspace_file_edit_whitelist() {
         "workspacePaths": [ws]
     });
     assert!(is_workspace_edit(&payload));
+    assert!(is_workspace_file_op(&payload));
 
     // 6. Path traversal attempting escape -> rejected
     let payload = json!({
@@ -417,6 +461,7 @@ fn workspace_file_edit_whitelist() {
         "workspacePaths": [ws]
     });
     assert!(!is_workspace_edit(&payload));
+    assert!(!is_workspace_file_op(&payload));
 
     // 7. Directly targeting .git directory -> rejected
     let payload = json!({
@@ -429,6 +474,7 @@ fn workspace_file_edit_whitelist() {
         "workspacePaths": [ws]
     });
     assert!(!is_workspace_edit(&payload));
+    assert!(!is_workspace_file_op(&payload));
 
     let payload = json!({
         "toolCall": {
@@ -440,6 +486,7 @@ fn workspace_file_edit_whitelist() {
         "workspacePaths": [ws]
     });
     assert!(!is_workspace_edit(&payload));
+    assert!(!is_workspace_file_op(&payload));
 
     // 8. File modification outside workspace -> rejected
     let payload = json!({
@@ -452,6 +499,7 @@ fn workspace_file_edit_whitelist() {
         "workspacePaths": [ws]
     });
     assert!(!is_workspace_edit(&payload));
+    assert!(!is_workspace_file_op(&payload));
 
     // 9. Non-edit tools -> rejected
     let payload = json!({
@@ -463,6 +511,20 @@ fn workspace_file_edit_whitelist() {
         },
         "workspacePaths": [ws]
     });
+    assert!(!is_workspace_edit(&payload));
+    assert!(!is_workspace_file_op(&payload));
+
+    // 10. Read tool under workspace -> is_workspace_file_op is true, but is_workspace_edit is false
+    let payload = json!({
+        "toolCall": {
+            "name": "view_file",
+            "args": {
+                "AbsolutePath": format!("{ws}/src/lib.rs")
+            }
+        },
+        "workspacePaths": [ws]
+    });
+    assert!(is_workspace_file_op(&payload));
     assert!(!is_workspace_edit(&payload));
 }
 
@@ -635,4 +697,3 @@ allow:
     }
     reset_cache();
 }
-

@@ -79,7 +79,51 @@ case "$url" in
 esac
 "#,
         );
+        executable(
+            &dir.path().join("bin/agy"),
+            r#"#!/bin/sh
+case "$1" in
+  plugin)
+    case "$2" in
+      install)
+        target="$3"
+        dest="$HOME/.gemini/config/plugins/agy-auto-approve"
+        mkdir -p "$dest"
+        cp -R "$target/." "$dest/"
+        manifest="$HOME/.gemini/config/import_manifest.json"
+        mkdir -p "$(dirname "$manifest")"
+        if [ ! -f "$manifest" ]; then
+          printf '{"imports":[{"name":"agy-auto-approve","source":"antigravity","importedAt":"2026-09-15T00:00:00Z","components":["hooks"]}]}\n' > "$manifest"
+        fi
+        exit 0
+        ;;
+      list)
+        cat "$HOME/.gemini/config/import_manifest.json" 2>/dev/null || echo '{"imports":[]}'
+        exit 0
+        ;;
+      validate)
+        exit 0
+        ;;
+      *)
+        exit 0
+        ;;
+    esac
+    ;;
+  --version)
+    echo 'agy 2.0.0'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+"#,
+        );
         fs::create_dir_all(dir.path().join("home/.local/bin")).unwrap();
+        let _ = fs::copy(
+            dir.path().join("bin/agy"),
+            dir.path().join("home/.local/bin/agy"),
+        );
         fs::copy(
             env!("CARGO_BIN_EXE_agy-auto-approve"),
             dir.path().join("home/.local/bin/agy-auto-approve"),
@@ -91,6 +135,7 @@ esac
         let mut c = Command::new(self.installed());
         c.arg("update")
             .env("HOME", self.dir.path().join("home"))
+            .env("AGY_BIN", self.dir.path().join("bin/agy"))
             .env("AGY_APPROVER_SOCKET", self.dir.path().join("approver.sock"))
             .env("AGY_APPROVER_STATE_DIR", self.dir.path().join("state"))
             .env("AGY_AUTO_APPROVE_LOG_DIR", self.dir.path().join("logs"))
@@ -347,12 +392,16 @@ fn successful_update_stops_existing_daemon() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    for _ in 0..100 {
+    for _ in 0..250 {
         if f.dir.path().join("approver.sock").exists() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    assert!(
+        f.dir.path().join("approver.sock").exists(),
+        "approver.sock must exist before update runs"
+    );
     let out = f.run(f.command(), &[]);
     let stopped = !f.dir.path().join("approver.sock").exists();
     let _ = daemon.kill();

@@ -6,8 +6,9 @@ Reviewer processes execute with their working directory in `~/.gemini/agy-auto-a
 
 ## How it works
 
-CLI and Desktop share the same approval pipeline. Local rules handle allowlisted
-read-only tools and blocked commands; other requests go to an AI reviewer that
+CLI and Desktop share the same approval pipeline. Permission rules configure
+allowed or denied actions in YAML; by default, read_file and write_file
+under workspace are allowed. Other requests go to an AI reviewer that
 assesses risk and user authorization.
 
 ```text
@@ -15,17 +16,19 @@ Antigravity CLI / Desktop
            |
      Approval hook
            |
-     Read-only tool? -------- yes ------> Allow
+     Config deny list? ------------- yes ------> Deny
            | no
-     Blocklisted command? -- yes ------> Deny
+     Config allow list? ------------ yes ------> Allow
            | no
-     Circuit breaker open? - yes ------> Ask user
+     Workspace read / write file? -- yes ------> Allow
+           | no
+     Circuit breaker open? --------- yes ------> Ask user
            | no
      Persistent daemon
            |
-     agy Reviewer Process -------------> Allow / Deny
+     agy Reviewer Process ---------------------> Allow / Deny
            |
-     Error or timeout -----------------> Deny
+     Error or timeout -------------------------> Deny
 ```
 
 The daemon manages reviewer sessions per source conversation, allowing the model service
@@ -61,12 +64,13 @@ Or install from crates.io once the crate is published (requires Rust/Cargo and a
 cargo install agy-auto-approve --locked
 ```
 
-Then install the lifecycle hooks:
+Then install the plugin via Antigravity CLI:
 
 ```bash
 agy-auto-approve install
 ```
 
+This command stages the plugin manifest and hooks, then executes `agy plugin install` to register it into `~/.gemini/config/plugins/agy-auto-approve/` and `import_manifest.json` for both CLI and Desktop.
 See the [command reference](docs/commands.md) for upgrades and installation options.
 
 ## Logs

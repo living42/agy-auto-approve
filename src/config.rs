@@ -102,10 +102,7 @@ pub enum PermissionAction {
 pub enum TargetMatcher {
     Wildcard,
     Regex(Regex),
-    Path {
-        path: PathBuf,
-        recursive: bool,
-    },
+    Path { path: PathBuf, recursive: bool },
     UrlDomain(String),
     ToolName(String),
 }
@@ -206,13 +203,14 @@ impl PermissionRule {
         } else {
             match action {
                 PermissionAction::ReadFile | PermissionAction::WriteFile => {
-                    let (clean_path, recursive) = if let Some(prefix) = target_str.strip_suffix("/**") {
-                        (prefix, true)
-                    } else if let Some(prefix) = target_str.strip_suffix("/*") {
-                        (prefix, true)
-                    } else {
-                        (target_str, false)
-                    };
+                    let (clean_path, recursive) =
+                        if let Some(prefix) = target_str.strip_suffix("/**") {
+                            (prefix, true)
+                        } else if let Some(prefix) = target_str.strip_suffix("/*") {
+                            (prefix, true)
+                        } else {
+                            (target_str, false)
+                        };
 
                     let expanded = if clean_path == "~" {
                         home()
@@ -295,9 +293,7 @@ impl PermissionRule {
         match &self.matcher {
             TargetMatcher::Wildcard => true,
             TargetMatcher::Regex(re) => re.is_match(url),
-            TargetMatcher::UrlDomain(domain) => {
-                url.contains(domain)
-            }
+            TargetMatcher::UrlDomain(domain) => url.contains(domain),
             _ => false,
         }
     }
@@ -317,10 +313,9 @@ fn build_command_regex(pattern: &str) -> String {
         return pattern.to_string();
     }
     let mut regex = String::from("^");
-    let mut chars = pattern.chars().peekable();
     let has_wildcard = pattern.contains('*') || pattern.contains('?');
 
-    while let Some(c) = chars.next() {
+    for c in pattern.chars() {
         match c {
             '*' => regex.push_str(".*"),
             '?' => regex.push('.'),
@@ -485,7 +480,12 @@ impl Default for DaemonConfig {
 pub struct PermissionsBlock {
     #[serde(default, alias = "deny_list", alias = "denylist", alias = "blacklist")]
     pub deny: RuleList,
-    #[serde(default, alias = "allow_list", alias = "allowlist", alias = "whitelist")]
+    #[serde(
+        default,
+        alias = "allow_list",
+        alias = "allowlist",
+        alias = "whitelist"
+    )]
     pub allow: RuleList,
 }
 
@@ -507,7 +507,11 @@ pub struct Config {
     #[serde(default = "default_model", alias = "module")]
     pub model: String,
 
-    #[serde(default = "default_effort", alias = "thinking_effort", alias = "thinking effort")]
+    #[serde(
+        default = "default_effort",
+        alias = "thinking_effort",
+        alias = "thinking effort"
+    )]
     pub effort: String,
 
     #[serde(
@@ -527,7 +531,12 @@ pub struct Config {
     #[serde(default, alias = "deny_list", alias = "denylist", alias = "blacklist")]
     pub deny: RuleList,
 
-    #[serde(default, alias = "allow_list", alias = "allowlist", alias = "whitelist")]
+    #[serde(
+        default,
+        alias = "allow_list",
+        alias = "allowlist",
+        alias = "whitelist"
+    )]
     pub allow: RuleList,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -574,29 +583,23 @@ static CONFIG_CACHE: LazyLock<RwLock<Option<CachedConfig>>> = LazyLock::new(|| R
 /// 3. User config `~/.gemini/agy-auto-approve/config.yaml`
 /// 4. Legacy global config `~/.gemini/config/agy-auto-approve.yaml`
 pub fn find_config_file() -> Option<PathBuf> {
-    if let Some(explicit) = env::var_os("AGY_AUTO_APPROVE_CONFIG")
-        .filter(|s| !s.is_empty())
-    {
+    if let Some(explicit) = env::var_os("AGY_AUTO_APPROVE_CONFIG").filter(|s| !s.is_empty()) {
         let p = PathBuf::from(explicit);
         if p.is_file() {
             return Some(p);
         }
     }
 
-    for path in [
+    [
         PathBuf::from(".agents/agy-auto-approve.yaml"),
         PathBuf::from(".agents/agy-auto-approve.yml"),
         home().join(".gemini/agy-auto-approve/config.yaml"),
         home().join(".gemini/agy-auto-approve/config.yml"),
         home().join(".gemini/config/agy-auto-approve.yaml"),
         home().join(".gemini/config/agy-auto-approve.yml"),
-    ] {
-        if path.is_file() {
-            return Some(path);
-        }
-    }
-
-    None
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
 }
 
 /// Return path of active configuration file if one exists.
@@ -614,10 +617,11 @@ pub fn current() -> Arc<Config> {
 
     {
         let cache = CONFIG_CACHE.read().unwrap();
-        if let Some(ref cached) = *cache {
-            if cached.path == resolved_path && cached.mtime == current_mtime {
-                return cached.config.clone();
-            }
+        if let Some(ref cached) = *cache
+            && cached.path == resolved_path
+            && cached.mtime == current_mtime
+        {
+            return cached.config.clone();
         }
     }
 
@@ -641,8 +645,8 @@ pub fn current() -> Arc<Config> {
 
     // Merge nested permissions block if present.
     if let Some(ref mut perms) = config.permissions {
-        config.deny.0.extend(perms.deny.0.drain(..));
-        config.allow.0.extend(perms.allow.0.drain(..));
+        config.deny.0.append(&mut perms.deny.0);
+        config.allow.0.append(&mut perms.allow.0);
     }
 
     // Apply environment variable overrides (highest precedence for runtime parameters).
@@ -753,10 +757,7 @@ pub fn prompt() -> String {
 /// Return configured evaluation model and reasoning effort.
 pub fn model_and_effort() -> (String, String) {
     let c = current();
-    (
-        setting("model", &c.model),
-        setting("effort", &c.effort),
-    )
+    (setting("model", &c.model), setting("effort", &c.effort))
 }
 
 /// Return evaluation timeout in seconds for reviewer LLM evaluations.
@@ -872,7 +873,7 @@ fn check_rules_match(
     // File writing tools
     if matches!(
         tool,
-        "write_to_file" | "replace_file_content" | "edit_file" | "apply_patch"
+        "write_file" | "write_to_file" | "replace_file_content" | "edit_file" | "apply_patch"
     ) {
         let target_str = args["TargetFile"]
             .as_str()
@@ -899,11 +900,20 @@ fn check_rules_match(
     }
 
     // File reading tools
-    if matches!(tool, "view_file" | "grep_search" | "list_dir" | "find_by_name") {
+    if matches!(
+        tool,
+        "read_file" | "view_file" | "grep_search" | "list_dir" | "find_by_name"
+    ) {
         let target_str = args["AbsolutePath"]
             .as_str()
             .or_else(|| args["SearchPath"].as_str())
             .or_else(|| args["DirectoryPath"].as_str())
+            .or_else(|| args["SearchDirectory"].as_str())
+            .or_else(|| args["path"].as_str())
+            .or_else(|| args["file_path"].as_str())
+            .or_else(|| args["FilePath"].as_str())
+            .or_else(|| args["TargetFile"].as_str())
+            .or_else(|| args["target_file"].as_str())
             .unwrap_or("")
             .trim();
 
@@ -923,7 +933,11 @@ fn check_rules_match(
 
     // URL tools
     if matches!(tool, "read_url_content" | "read_browser_page") {
-        let url_str = args["Url"].as_str().or_else(|| args["url"].as_str()).unwrap_or("").trim();
+        let url_str = args["Url"]
+            .as_str()
+            .or_else(|| args["url"].as_str())
+            .unwrap_or("")
+            .trim();
         if !url_str.is_empty() {
             for rule in rules {
                 if rule.matches_url(url_str) {
@@ -941,7 +955,10 @@ fn check_rules_match(
     for rule in rules {
         if rule.matches_tool_name(tool) {
             let verb = if is_deny { "Blocked" } else { "Allowed" };
-            return Some(format!("{verb} by permission rule '{}' for tool '{tool}'", rule.raw));
+            return Some(format!(
+                "{verb} by permission rule '{}' for tool '{tool}'",
+                rule.raw
+            ));
         }
     }
 

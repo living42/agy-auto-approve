@@ -1,66 +1,12 @@
-use crate::{audit, config, daemon, parser, reviewer::Assessment};
+use crate::{audit, config, daemon, reviewer::Assessment};
 use anyhow::Result;
 use fs2::FileExt;
-use regex::Regex;
 use serde_json::{Value, json};
 use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    sync::LazyLock,
 };
-
-/// Check command against hardcoded blacklist patterns.
-/// Rejects dangerous destructive actions immediately without LLM review.
-pub fn blacklist(command: &str) -> Option<String> {
-    static PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-        [
-            r"(?:^|[;&|\n`$()])\s*rm\s+-[rfRF]*\s+/(?:\*|\s*$)",
-            r"(?:^|[;&|\n`$()])\s*rm\s+-[rfRF]*\s+~(?:/.*|\s*$)",
-            r"(?:^|[;&|\n`$()])\s*rm\s+-[rfRF]*\s+\$HOME(?:/.*|\s*$)",
-            r"(?:^|[;&|\n`$()])\s*rm\s+-[rfRF]*\s+/(?:etc|usr|var|bin|System|boot|sbin|Users|home)(?:/|\s+|$)",
-            r"(?:^|[;&|\n`$()])\s*rm\s+-[rfRF]*\s+(?:.*/)?\.git(?:/|\s+|$)",
-            r"\bmkfs\b",
-            r"\bfdisk\b",
-            r"\bdd\s+if=",
-            r":\(\)\{\s*:\|:&\s*\};:",
-            r"(?:^|[;&|\n`$()])\s*chmod\s+-[rwxRWX0-7]*\s+777\s+/",
-        ]
-        .iter()
-        .map(|s| Regex::new(s).unwrap())
-        .collect()
-    });
-    for cmd in std::iter::once(command.to_string()).chain(parser::commands(command)) {
-        for pattern in PATTERNS.iter() {
-            if pattern.is_match(&cmd) {
-                return Some(format!(
-                    "Blocked by hard blacklist: matched pattern '{}'",
-                    pattern.as_str()
-                ));
-            }
-        }
-    }
-    None
-}
-
-/// Determine if a tool is safe and read-only.
-/// Read-only tools are approved immediately without LLM review.
-pub fn read_only(tool: &str) -> bool {
-    matches!(
-        tool,
-        "view_file"
-            | "grep_search"
-            | "find_by_name"
-            | "list_dir"
-            | "read_url_content"
-            | "search_web"
-            | "read_browser_page"
-            | "finish"
-            | "command_status"
-            | "wait"
-            | "wait_5_seconds"
-    )
-}
 
 /// Normalize path components lexically without accessing the filesystem.
 ///
@@ -139,50 +85,24 @@ pub fn is_subpath(target: &Path, base: &Path) -> bool {
     false
 }
 
-/// Determine whether a tool call is an authorized file edit within the workspace.
+/// Target file or directory operation kind.
 ///
 /// Responsibility:
-/// Identifies file-modifying tools (`write_to_file`, `replace_file_content`, `edit_file`, `apply_patch`)
-/// whose target file resides inside the active workspace or artifact directories.
+/// Identifies whether an operation reads or modifies a file or directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileOpKind {
+    Read,
+    Write,
+}
+
+/// Extract all workspace roots from payload.
+///
+/// Responsibility:
+/// Collects all valid workspace roots, artifact directories, and project paths.
 ///
 /// How it works:
-/// 1. Checks if the tool name matches file editing tools.
-/// 2. Extracts the target file path from tool arguments.
-/// 3. Rejects any target path targeting `.git` metadata or hooks.
-/// 4. Resolves relative target paths against workspace roots.
-/// 5. Verifies the target path is inside `workspacePaths`, `artifactDirectoryPath`, or `extract_project`.
-pub fn is_workspace_edit(payload: &Value) -> bool {
-    let tool = payload["toolCall"]["name"].as_str().unwrap_or("");
-    if !matches!(
-        tool,
-        "write_to_file" | "replace_file_content" | "edit_file" | "apply_patch"
-    ) {
-        return false;
-    }
-
-    let args = &payload["toolCall"]["args"];
-    let target_str = args["TargetFile"]
-        .as_str()
-        .or_else(|| args["target_file"].as_str())
-        .or_else(|| args["FilePath"].as_str())
-        .or_else(|| args["file_path"].as_str())
-        .or_else(|| args["Path"].as_str())
-        .or_else(|| args["path"].as_str())
-        .unwrap_or("")
-        .trim();
-
-    if target_str.is_empty() {
-        return false;
-    }
-
-    let target_path = Path::new(target_str);
-    let norm_target = normalize_path(target_path);
-
-    // Never auto-approve direct modifications to .git metadata or hooks.
-    if norm_target.components().any(|c| c.as_os_str() == ".git") {
-        return false;
-    }
-
+/// Extracts paths from `workspacePaths`, `artifactDirectoryPath`, and `extract_project`.
+pub fn extract_workspace_roots(payload: &Value) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(ws) = payload["workspacePaths"].as_array() {
         for p in ws
@@ -206,8 +126,79 @@ pub fn is_workspace_edit(payload: &Value) -> bool {
             roots.push(p);
         }
     }
+    roots
+}
 
-    for root in &roots {
+/// Extract file operation kind and target path from tool call payload.
+///
+/// Responsibility:
+/// Detects file-reading and file-writing tools and resolves their target path argument.
+///
+/// How it works:
+/// 1. Identifies read tools (`read_file`, `view_file`, `grep_search`, `find_by_name`, `list_dir`).
+/// 2. Identifies write tools (`write_file`, `write_to_file`, `replace_file_content`, `edit_file`, `apply_patch`).
+/// 3. Extracts target path string from tool arguments.
+pub fn extract_file_op(payload: &Value) -> Option<(FileOpKind, PathBuf)> {
+    let tool = payload["toolCall"]["name"].as_str().unwrap_or("");
+    let args = &payload["toolCall"]["args"];
+
+    let is_read = matches!(
+        tool,
+        "read_file" | "view_file" | "grep_search" | "find_by_name" | "list_dir"
+    );
+    let is_write = matches!(
+        tool,
+        "write_file" | "write_to_file" | "replace_file_content" | "edit_file" | "apply_patch"
+    );
+
+    if !is_read && !is_write {
+        return None;
+    }
+
+    let target_str = if is_read {
+        args["AbsolutePath"]
+            .as_str()
+            .or_else(|| args["SearchPath"].as_str())
+            .or_else(|| args["DirectoryPath"].as_str())
+            .or_else(|| args["SearchDirectory"].as_str())
+            .or_else(|| args["path"].as_str())
+            .or_else(|| args["file_path"].as_str())
+            .or_else(|| args["FilePath"].as_str())
+            .or_else(|| args["TargetFile"].as_str())
+            .or_else(|| args["target_file"].as_str())
+    } else {
+        args["TargetFile"]
+            .as_str()
+            .or_else(|| args["target_file"].as_str())
+            .or_else(|| args["FilePath"].as_str())
+            .or_else(|| args["file_path"].as_str())
+            .or_else(|| args["Path"].as_str())
+            .or_else(|| args["path"].as_str())
+    }?;
+
+    let trimmed = target_str.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let kind = if is_read {
+        FileOpKind::Read
+    } else {
+        FileOpKind::Write
+    };
+    Some((kind, PathBuf::from(trimmed)))
+}
+
+/// Determine whether a target path is under any of the given workspace roots.
+///
+/// Responsibility:
+/// Validates that target path stays within permitted workspace boundaries.
+///
+/// How it works:
+/// 1. Resolves relative target paths against workspace roots.
+/// 2. Verifies `is_subpath` to prevent path traversal escapes.
+pub fn is_path_under_workspace(target_path: &Path, roots: &[PathBuf]) -> bool {
+    for root in roots {
         let full_target = if target_path.is_relative() {
             root.join(target_path)
         } else {
@@ -217,8 +208,40 @@ pub fn is_workspace_edit(payload: &Value) -> bool {
             return true;
         }
     }
-
     false
+}
+
+/// Determine whether a tool call is an authorized file operation under the workspace.
+///
+/// Responsibility:
+/// Automatically approves read_file and write_file operations under workspace roots by default.
+///
+/// How it works:
+/// 1. Extracts operation kind (Read or Write) and target path.
+/// 2. For write operations: blocks direct modifications to .git metadata or hooks.
+/// 3. Verifies that the target path resides within workspace roots.
+pub fn is_workspace_file_op(payload: &Value) -> bool {
+    let Some((kind, target_path)) = extract_file_op(payload) else {
+        return false;
+    };
+
+    let norm_target = normalize_path(&target_path);
+
+    // Write operations must not modify .git metadata or hooks by default.
+    if kind == FileOpKind::Write && norm_target.components().any(|c| c.as_os_str() == ".git") {
+        return false;
+    }
+
+    let roots = extract_workspace_roots(payload);
+    is_path_under_workspace(&target_path, &roots)
+}
+
+/// Backward compatibility helper for workspace write operations.
+pub fn is_workspace_edit(payload: &Value) -> bool {
+    match extract_file_op(payload) {
+        Some((FileOpKind::Write, _)) => is_workspace_file_op(payload),
+        _ => false,
+    }
 }
 
 /// Unified per-conversation state management.
@@ -307,7 +330,10 @@ impl ConversationState {
                 .take(window)
                 .filter(|v| **v == "deny")
                 .count();
-            if history.len() >= window && denials >= threshold && history.last() == Some(&json!("deny")) {
+            if history.len() >= window
+                && denials >= threshold
+                && history.last() == Some(&json!("deny"))
+            {
                 return Some(format!(
                     "Circuit breaker tripped: {denials}/{window} denials in recent window. Halting loop to prompt user."
                 ));
@@ -511,7 +537,7 @@ fn extract_project(payload: &Value) -> String {
     String::new()
 }
 
-/// Inner evaluation pipeline executing whitelist, blacklist, circuit breaker, and daemon review.
+/// Inner evaluation pipeline executing permission rules, default workspace operations, circuit breaker, and daemon review.
 async fn evaluate_inner(payload: &Value, id: &str, stage: &mut &'static str) -> Value {
     let tool = payload["toolCall"]["name"].as_str().unwrap_or("");
     let args = &payload["toolCall"]["args"];
@@ -540,37 +566,14 @@ async fn evaluate_inner(payload: &Value, id: &str, stage: &mut &'static str) -> 
         }
     }
 
-    if read_only(tool) {
-        *stage = "whitelist";
-        return result("allow", "Read-only tool automatically approved.", tool);
-    }
-
-    if tool == "manage_task" {
-        let action = args["Action"].as_str().unwrap_or("");
-        if action == "list" || action == "status" {
-            *stage = "whitelist";
-            return result(
-                "allow",
-                "Read-only task inspection automatically approved.",
-                tool,
-            );
-        }
-    }
-
-    if is_workspace_edit(payload) {
-        *stage = "whitelist";
+    // By default, read_file and write_file operations under workspace are allowed.
+    if is_workspace_file_op(payload) {
+        *stage = "workspace";
         return result(
             "allow",
-            "Workspace file modification automatically approved.",
+            "Workspace file operation automatically approved by default.",
             tool,
         );
-    }
-
-    if tool == "run_command"
-        && let Some(reason) = blacklist(args["CommandLine"].as_str().unwrap_or(""))
-    {
-        *stage = "blacklist";
-        return result("deny", &reason, tool);
     }
     let cid = conversation_id(payload);
     let mut state = match ConversationState::open(&config::state_dir(), cid) {

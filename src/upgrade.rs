@@ -130,8 +130,72 @@ fn read_config(path: &Path) -> Result<Value> {
         Err(e) => Err(e.into()),
     }
 }
+/// Detect whether agy-auto-approve is currently installed and enabled for CLI and Desktop.
+///
+/// Responsibility:
+/// Identifies the active plugin scope before an executable upgrade so the
+/// configuration refresh can target the correct environments.
+///
+/// How it works:
+/// 1. Checks if the plugin exists in ~/.gemini/config/plugins/agy-auto-approve.
+/// 2. If present, verifies that the plugin is not disabled in manifests or config.
+/// 3. Reads the .scope metadata file if available to determine CLI and Desktop scopes.
+/// 4. Checks legacy ~/.gemini/antigravity-cli/plugins/ directory if present.
+/// 5. Falls back to legacy ~/.gemini/config/hooks.json and config.json sidecar detection.
 fn installed_scope() -> Result<(bool, bool)> {
-    let base = config::home().join(".gemini/config");
+    let home = config::home();
+    let desktop_plugin_dir = home.join(".gemini/config/plugins").join(NAME);
+    let cli_plugin_dir = home.join(".gemini/antigravity-cli/plugins").join(NAME);
+
+    let desktop_plugin_exists = desktop_plugin_dir.join("plugin.json").exists()
+        || desktop_plugin_dir.join("hooks.json").exists();
+    let cli_plugin_exists =
+        cli_plugin_dir.join("plugin.json").exists() || cli_plugin_dir.join("hooks.json").exists();
+
+    if desktop_plugin_exists || cli_plugin_exists {
+        if desktop_plugin_exists {
+            let plugin_json = read_config(&desktop_plugin_dir.join("plugin.json"))?;
+            let plugin_hooks = read_config(&desktop_plugin_dir.join("hooks.json"))?;
+            let desktop = read_config(&home.join(".gemini/config/config.json"))?;
+            let disabled_manifest = plugin_json["disabled"] == true;
+            let disabled_hooks = plugin_hooks[NAME]["enabled"] == false;
+            let disabled_config = desktop["plugins"][NAME]["enabled"] == false;
+            let is_enabled = !disabled_manifest && !disabled_hooks && !disabled_config;
+
+            if !is_enabled {
+                return Ok((false, false));
+            }
+
+            // Check if .scope metadata file exists from installation.
+            let scope_file = desktop_plugin_dir.join(".scope");
+            if let Ok(scope_data) = read_config(&scope_file) {
+                let cli = scope_data["cli"].as_bool().unwrap_or(true);
+                let desktop = scope_data["desktop"].as_bool().unwrap_or(true);
+                return Ok((cli, desktop));
+            }
+
+            // Without .scope file, check legacy CLI plugin directory.
+            let cli_enabled = if cli_plugin_exists {
+                let cli_json = read_config(&cli_plugin_dir.join("plugin.json"))?;
+                let cli_hooks = read_config(&cli_plugin_dir.join("hooks.json"))?;
+                cli_json["disabled"] != true && cli_hooks[NAME]["enabled"] != false
+            } else {
+                true
+            };
+
+            return Ok((cli_enabled, true));
+        }
+
+        if cli_plugin_exists {
+            let cli_json = read_config(&cli_plugin_dir.join("plugin.json"))?;
+            let cli_hooks = read_config(&cli_plugin_dir.join("hooks.json"))?;
+            let cli_enabled = cli_json["disabled"] != true && cli_hooks[NAME]["enabled"] != false;
+            return Ok((cli_enabled, false));
+        }
+    }
+
+    // Fall back to legacy hooks.json and config.json sidecar detection.
+    let base = home.join(".gemini/config");
     let hooks = read_config(&base.join("hooks.json"))?;
     let desktop = read_config(&base.join("config.json"))?;
     let hook = &hooks[NAME];

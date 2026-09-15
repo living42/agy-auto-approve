@@ -71,6 +71,48 @@ impl Sandbox {
         fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
         fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
     }
+
+    fn mock_agy(&self) {
+        self.mock(
+            r#"
+case "$1" in
+  plugin)
+    case "$2" in
+      install)
+        target="$3"
+        dest="$HOME/.gemini/config/plugins/agy-auto-approve"
+        mkdir -p "$dest"
+        cp -R "$target/." "$dest/"
+        manifest="$HOME/.gemini/config/import_manifest.json"
+        mkdir -p "$(dirname "$manifest")"
+        if [ ! -f "$manifest" ]; then
+          printf '{"imports":[{"name":"agy-auto-approve","source":"antigravity","importedAt":"2026-09-15T00:00:00Z","components":["hooks"]}]}\n' > "$manifest"
+        fi
+        exit 0
+        ;;
+      list)
+        cat "$HOME/.gemini/config/import_manifest.json" 2>/dev/null || echo '{"imports":[]}'
+        exit 0
+        ;;
+      validate)
+        exit 0
+        ;;
+      *)
+        exit 0
+        ;;
+    esac
+    ;;
+  --version)
+    echo 'agy 2.0.0'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+"#,
+        );
+    }
 }
 
 impl Drop for Sandbox {
@@ -87,6 +129,20 @@ fn payload(command: &str) -> String {
             "args": { "CommandLine": command }
         },
         "workspacePaths": []
+    })
+    .to_string()
+}
+
+fn ws_payload(s: &Sandbox, file_name: &str) -> String {
+    let ws = s.dir.path().join("workspace");
+    let _ = fs::create_dir_all(&ws);
+    json!({
+        "conversationId": "test",
+        "workspacePaths": [ws.display().to_string()],
+        "toolCall": {
+            "name": "view_file",
+            "args": { "AbsolutePath": ws.join(file_name).display().to_string() }
+        }
     })
     .to_string()
 }
@@ -165,9 +221,19 @@ fn missing_reviewer_logs_error_and_infrastructure_failure() {
 fn lifecycle_auto_spawn_fail_closed_and_breaker() {
     let s = Sandbox::new();
     assert!(!s.run(&["daemon", "status"]).status.success());
-    let out = s.hook(&json!({"toolCall":{"name":"view_file","args":{}}}).to_string());
+    // 1. Workspace file operation allowed on fast path without starting daemon
+    let out = s.hook(&ws_payload(&s, "test.txt"));
     assert_eq!(out["decision"], "allow");
     assert!(!s.socket.exists());
+
+    // 2. Config deny rule blocked on fast path without starting daemon
+    let cfg_dir = s.dir.path().join(".gemini/agy-auto-approve");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    fs::write(
+        cfg_dir.join("config.yaml"),
+        "deny:\n  - \"command(rm -rf /*)\"\n",
+    )
+    .unwrap();
     assert_eq!(s.hook(&payload("echo $(rm -rf /)"))["decision"], "deny");
     assert!(!s.socket.exists());
     assert_eq!(s.hook("broken")["decision"], "ask");
@@ -243,22 +309,48 @@ fn idle_shutdown_and_socket_collision() {
 #[test]
 fn registration_preserves_configuration_and_uses_absolute_binary() {
     let s = Sandbox::new();
+    s.mock_agy();
     let config = s.dir.path().join(".gemini/config");
     fs::create_dir_all(&config).unwrap();
-    fs::write(config.join("hooks.json"), r#"{"other":{"enabled":true}}"#).unwrap();
+    fs::write(
+        config.join("hooks.json"),
+        r#"{"other":{"enabled":true},"agy-auto-approve":{"enabled":true}}"#,
+    )
+    .unwrap();
     let out = s.run(&["install"]);
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let v: Value = serde_json::from_slice(&fs::read(config.join("hooks.json")).unwrap()).unwrap();
-    assert_eq!(v["other"]["enabled"], true);
-    let command = v["agy-auto-approve"]["PreToolUse"][0]["hooks"][0]["command"]
+    let legacy: Value =
+        serde_json::from_slice(&fs::read(config.join("hooks.json")).unwrap()).unwrap();
+    assert_eq!(legacy["other"]["enabled"], true);
+    assert!(legacy.get("agy-auto-approve").is_none());
+
+    let desktop_plugin_dir = config.join("plugins/agy-auto-approve");
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(desktop_plugin_dir.join("plugin.json")).unwrap()).unwrap();
+    assert_eq!(manifest["name"], "agy-auto-approve");
+    assert_eq!(
+        manifest["$schema"],
+        "https://antigravity.google/schemas/v1/plugin.json"
+    );
+
+    let hooks: Value =
+        serde_json::from_slice(&fs::read(desktop_plugin_dir.join("hooks.json")).unwrap()).unwrap();
+    assert_eq!(hooks["agy-auto-approve"]["enabled"], true);
+    let command = hooks["agy-auto-approve"]["PreToolUse"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();
     assert!(command.contains(env!("CARGO_BIN_EXE_agy-auto-approve")));
     assert!(!command.contains("python"));
+
+    let import_manifest: Value =
+        serde_json::from_slice(&fs::read(config.join("import_manifest.json")).unwrap()).unwrap();
+    let imports = import_manifest["imports"].as_array().unwrap();
+    assert!(imports.iter().any(|i| i["name"] == "agy-auto-approve"));
+
     assert!(s.run(&["install"]).status.success());
     fs::write(config.join("hooks.json"), "invalid JSON").unwrap();
     assert!(!s.run(&["install", "--cli-only"]).status.success());
@@ -440,11 +532,14 @@ done
     let input = payload("cargo test --locked");
     let output = s.hook(&input);
     assert_eq!(output["decision"], "allow");
+    let ws = s.dir.path().join("workspace");
+    fs::create_dir_all(&ws).unwrap();
     let readonly = json!({
         "conversationId": "readonly",
+        "workspacePaths": [ws.display().to_string()],
         "toolCall": {
             "name": "view_file",
-            "args": { "AbsolutePath": "/tmp/example" }
+            "args": { "AbsolutePath": ws.join("example.txt").display().to_string() }
         }
     });
     s.hook(&readonly.to_string());
@@ -486,7 +581,7 @@ done
     let latest: Value =
         serde_json::from_slice(&s.run(&["logs", "--json", "--limit", "1"]).stdout).unwrap();
     assert_eq!(latest[0]["tool"], "view_file");
-    assert_eq!(latest[0]["stage"], "whitelist");
+    assert_eq!(latest[0]["stage"], "workspace");
     assert!(!s.run(&["logs", "show", "missing"]).status.success());
     assert!(!s.run(&["logs", "--limit", "0"]).status.success());
     assert!(!s.socket.exists(), "logs must not spawn a daemon");
@@ -504,7 +599,7 @@ fn logs_records_failures_and_concurrent_hooks() {
         serde_json::from_slice::<Value>(&s.run(&["logs", "--json"]).stdout).unwrap(),
         json!([])
     );
-    let input = json!({"toolCall":{"name":"view_file","args":{}}}).to_string();
+    let input = ws_payload(&s, "concurrent.txt");
     let mut children = Vec::new();
     for _ in 0..12 {
         let mut child = s
@@ -548,6 +643,7 @@ fn logs_records_failures_and_concurrent_hooks() {
 #[test]
 fn installer_handles_prebuilt_binary_and_paths_with_spaces() {
     let s = Sandbox::new();
+    s.mock_agy();
     let install_dir = s.dir.path().join("bin with 'quote");
     fs::create_dir_all(&install_dir).unwrap();
     let binary = install_dir.join("agy-auto-approve");
@@ -557,6 +653,15 @@ fn installer_handles_prebuilt_binary_and_paths_with_spaces() {
             .arg("install")
             .args(flags)
             .env("HOME", s.dir.path())
+            .env("AGY_BIN", s.dir.path().join("agy"))
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    s.dir.path().display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
             .output()
             .unwrap()
     };
@@ -566,9 +671,15 @@ fn installer_handles_prebuilt_binary_and_paths_with_spaces() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let hooks: Value =
-        serde_json::from_slice(&fs::read(s.dir.path().join(".gemini/config/hooks.json")).unwrap())
-            .unwrap();
+    let hooks: Value = serde_json::from_slice(
+        &fs::read(
+            s.dir
+                .path()
+                .join(".gemini/config/plugins/agy-auto-approve/hooks.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     let hook_command = hooks["agy-auto-approve"]["PreToolUse"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();
@@ -585,7 +696,7 @@ fn installer_handles_prebuilt_binary_and_paths_with_spaces() {
         .stdin
         .take()
         .unwrap()
-        .write_all(b"{\"toolCall\":{\"name\":\"view_file\",\"args\":{}}}")
+        .write_all(ws_payload(&s, "test.txt").as_bytes())
         .unwrap();
     let out = child.wait_with_output().unwrap();
     assert_eq!(
@@ -645,7 +756,7 @@ impl Drop for LogFollower {
 #[test]
 fn logs_follow_snapshot_filters_partial_lines_and_rotation() {
     let s = Sandbox::new();
-    let readonly = json!({"toolCall":{"name":"view_file","args":{}}}).to_string();
+    let readonly = ws_payload(&s, "test.txt");
     s.hook(&readonly);
     s.hook(&readonly);
     let latest: Value =
@@ -755,6 +866,7 @@ done
 fn registration_modes_preserve_existing_permissions() {
     for mode in ["--cli-only", "--desktop-only"] {
         let s = Sandbox::new();
+        s.mock_agy();
         let cli = s.dir.path().join(".gemini/antigravity-cli");
         fs::create_dir_all(&cli).unwrap();
         let settings = json!({
@@ -769,9 +881,27 @@ fn registration_modes_preserve_existing_permissions() {
         assert!(out.status.success());
         let actual: Value =
             serde_json::from_slice(&fs::read(cli.join("settings.json")).unwrap()).unwrap();
+
+        assert!(
+            s.dir
+                .path()
+                .join(".gemini/config/plugins/agy-auto-approve/hooks.json")
+                .exists()
+        );
+        let scope: Value = serde_json::from_slice(
+            &fs::read(
+                s.dir
+                    .path()
+                    .join(".gemini/config/plugins/agy-auto-approve/.scope"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
         if mode == "--desktop-only" {
             assert_eq!(actual, settings);
-            assert!(s.dir.path().join(".gemini/config/hooks.json").exists());
+            assert_eq!(scope["cli"], false);
+            assert_eq!(scope["desktop"], true);
         } else {
             assert!(
                 actual["permissions"]["allow"]
@@ -784,8 +914,22 @@ fn registration_modes_preserve_existing_permissions() {
                 settings["permissions"]["deny"]
             );
             assert_eq!(actual["custom"], true);
+            assert_eq!(scope["cli"], true);
+            assert_eq!(scope["desktop"], false);
         }
     }
+}
+
+#[test]
+fn installer_fails_when_agy_not_found() {
+    let s = Sandbox::new();
+    let mut cmd = s.command();
+    cmd.env("AGY_BIN", s.dir.path().join("nonexistent-agy"))
+        .env("PATH", s.dir.path().join("empty"));
+    let out = cmd.arg("install").output().unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Could not find 'agy' executable"));
 }
 
 #[test]
@@ -811,18 +955,69 @@ allow:
     // 1. Allowed command fast-path without reviewer
     let git_res = s.hook(&payload("git status"));
     assert_eq!(git_res["decision"], "allow");
-    assert!(git_res["reason"].as_str().unwrap().contains("Allowed by permission rule"));
+    assert!(
+        git_res["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Allowed by permission rule")
+    );
 
     let ls_res = s.hook(&payload("ls -la"));
     assert_eq!(ls_res["decision"], "allow");
-    assert!(ls_res["reason"].as_str().unwrap().contains("Allowed by permission rule"));
+    assert!(
+        ls_res["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Allowed by permission rule")
+    );
 
     // 2. Denied command fast-path without reviewer
     let curl_res = s.hook(&payload("curl https://evil.com"));
     assert_eq!(curl_res["decision"], "deny");
-    assert!(curl_res["reason"].as_str().unwrap().contains("Blocked by permission rule"));
+    assert!(
+        curl_res["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Blocked by permission rule")
+    );
 
-    // 3. Command not matched by allow or deny passes through to reviewer
+    // 3. Workspace read_file and write_file allowed by default without reviewer
+    let ws = s.dir.path().join("workspace");
+    fs::create_dir_all(&ws).unwrap();
+
+    let ws_read = json!({
+        "workspacePaths": [ws.display().to_string()],
+        "toolCall": {
+            "name": "view_file",
+            "args": { "AbsolutePath": ws.join("src/lib.rs").display().to_string() }
+        }
+    });
+    let read_res = s.hook(&ws_read.to_string());
+    assert_eq!(read_res["decision"], "allow");
+    assert!(
+        read_res["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Workspace file operation")
+    );
+
+    let ws_write = json!({
+        "workspacePaths": [ws.display().to_string()],
+        "toolCall": {
+            "name": "write_to_file",
+            "args": { "TargetFile": ws.join("src/lib.rs").display().to_string() }
+        }
+    });
+    let write_res = s.hook(&ws_write.to_string());
+    assert_eq!(write_res["decision"], "allow");
+    assert!(
+        write_res["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Workspace file operation")
+    );
+
+    // 4. Command not matched by allow or deny passes through to reviewer
     s.mock(
         r#"
 echo '{"event":"init","conversation_id":"rev-1"}'
@@ -833,5 +1028,15 @@ done
     );
     let cargo_res = s.hook(&payload("cargo test"));
     assert_eq!(cargo_res["decision"], "allow");
-}
 
+    // 5. File read outside workspace not matched by allow passes through to reviewer
+    let outside_read = json!({
+        "workspacePaths": [ws.display().to_string()],
+        "toolCall": {
+            "name": "view_file",
+            "args": { "AbsolutePath": "/etc/hosts" }
+        }
+    });
+    let outside_res = s.hook(&outside_read.to_string());
+    assert_eq!(outside_res["decision"], "allow");
+}
