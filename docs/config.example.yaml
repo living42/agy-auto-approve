@@ -1,0 +1,88 @@
+# Configuration for agy-auto-approve
+# Location: ~/.gemini/agy-auto-approve/config.yaml
+# (Or project-level .agents/agy-auto-approve.yaml)
+
+# -----------------------------------------------------------------------------
+# Reviewer LLM Settings
+# -----------------------------------------------------------------------------
+# LLM model used for security evaluations (alias: module)
+model: "gemini-3.7-flash"
+
+# Reasoning effort level: low, medium, high (alias: thinking_effort)
+effort: "medium"
+
+# Maximum evaluation timeout in seconds (alias: evaluate_timeout, eval_timeout)
+timeout: 120
+
+# Optional custom system prompt string
+# prompt: "You are a specialized security reviewer..."
+
+# Optional path to a file that contains the system prompt
+# prompt_file: "~/.gemini/config/custom-prompt.txt"
+
+# -----------------------------------------------------------------------------
+# Antigravity Permission Rules
+# -----------------------------------------------------------------------------
+# Rule syntax: action(target)
+#
+# Supported actions:
+#   command(pattern)     - Terminal command execution
+#   unsandboxed(pattern) - Unsandboxed terminal command execution
+#   read_file(path)      - File and directory read operations
+#   write_file(path)     - File modifications (implicitly grants read_file)
+#   read_url(domain)     - Web page content fetch
+#   execute_url(domain)  - Browser navigation and execution
+#
+# Target formats:
+#   *                    - Wildcard matches all targets for this action
+#   prefix*              - Matches commands or paths with this prefix
+#   exact_name           - Matches exact command or path
+#   regex:<pattern>      - Evaluates regular expression
+#
+# Evaluation Precedence:
+#   Deny rules always evaluate before Allow rules (Deny > Allow).
+#   If an action matches Deny, the tool call is rejected immediately.
+#   If an action matches Allow, the tool call is approved immediately.
+#   If neither matches, the call proceeds to safety checks and LLM review.
+
+# Deny List: Operations blocked immediately without LLM review
+deny:
+  - "command(rm -rf /*)"
+  - "command(regex:.*mkfs.*)"
+  - "command(regex:.*fdisk.*)"
+  - "command(regex:.*dd\\s+if=.*)"
+  - "write_file(/etc/*)"
+  - "write_file(~/.ssh/*)"
+  - "write_file(~/.gnupg/*)"
+
+# Allow List: Operations approved immediately without LLM review
+allow:
+  # Fast-track common developer inspection commands
+  - "command(git*)"
+  - "command(cargo check*)"
+  - "command(cargo test*)"
+  - "command(cargo build*)"
+  - "unsandboxed(ls)"
+  - "unsandboxed(pwd)"
+  # Permit reading project files
+  - "read_file(*)"
+
+# -----------------------------------------------------------------------------
+# Circuit Breaker Limits
+# -----------------------------------------------------------------------------
+circuit_breaker:
+  # Halt loop and prompt user after this many consecutive denials
+  max_consecutive_denials: 3
+  # Size of recent evaluations window to analyze
+  recent_denials_window: 5
+  # Threshold of denials in the window that trips the circuit breaker
+  recent_denials_threshold: 4
+
+# -----------------------------------------------------------------------------
+# Daemon Process Settings
+# -----------------------------------------------------------------------------
+daemon:
+  # Daemon idle timeout in seconds before auto-shutdown (0 = disable)
+  idle_timeout: 1800
+  # Reclaim inactive reviewer worker processes after this many idle seconds
+  worker_reclaim_timeout: 600

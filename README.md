@@ -80,6 +80,36 @@ agy-auto-approve logs show APPROVAL_ID    # Show the full approval record
 
 Logs are stored in `~/.gemini/agy-auto-approve` and can be read without a running daemon.
 
+## Configuration
+
+Configure `agy-auto-approve` by placing a YAML file at:
+- `~/.gemini/agy-auto-approve/config.yaml`
+- Or project-level `.agents/agy-auto-approve.yaml`
+
+See [docs/config.example.yaml](docs/config.example.yaml) for a complete example.
+
+```yaml
+# Model and Reviewer parameters
+model: "gemini-3.7-flash"    # alias: module
+effort: "medium"            # alias: thinking_effort
+timeout: 120                # alias: evaluate_timeout, eval_timeout
+
+# Antigravity permission rules: action(target)
+# Precedence: Deny > Allow
+deny:
+  - "command(rm -rf /*)"
+  - "command(regex:.*mkfs.*)"
+  - "write_file(/etc/*)"
+  - "write_file(~/.ssh/*)"
+
+allow:
+  - "command(git*)"
+  - "command(cargo check*)"
+  - "command(cargo test*)"
+  - "unsandboxed(ls)"
+  - "read_file(*)"
+```
+
 For all commands and options, see the [command reference](docs/commands.md). For more details, see the [daemon architecture](docs/daemon.md) and [policy background](docs/auto_approver_architecture.md).
 
 ## License

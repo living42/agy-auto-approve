@@ -482,3 +482,157 @@ fn eval_timeout_configuration() {
         std::env::remove_var("AGY_AUTO_APPROVE_TIMEOUT");
     }
 }
+
+#[test]
+fn permission_syntax_parsing() {
+    use agy_auto_approve::config::{PermissionAction, PermissionRule};
+
+    let r1 = PermissionRule::parse("command(git*)").expect("parse git*");
+    assert_eq!(r1.action, PermissionAction::Command);
+    assert!(r1.matches_single_command("git status"));
+    assert!(r1.matches_single_command("git commit -m 'test'"));
+    assert!(!r1.matches_single_command("curl https://evil.com"));
+
+    let r2 = PermissionRule::parse("unsandboxed(ls)").expect("parse unsandboxed(ls)");
+    assert_eq!(r2.action, PermissionAction::Unsandboxed);
+    assert!(r2.matches_single_command("ls"));
+    assert!(r2.matches_single_command("ls -la"));
+    assert!(!r2.matches_single_command("lsof -i :8080"));
+
+    let r3 = PermissionRule::parse("command(regex:^npm run (test|build)$)").expect("parse regex");
+    assert!(r3.matches_single_command("npm run test"));
+    assert!(r3.matches_single_command("npm run build"));
+    assert!(!r3.matches_single_command("npm run publish"));
+
+    let r4 = PermissionRule::parse("read_file(/tmp/safe/*)").expect("parse read_file");
+    assert_eq!(r4.action, PermissionAction::ReadFile);
+    assert!(r4.matches_path(std::path::Path::new("/tmp/safe/a.txt"), false));
+    assert!(!r4.matches_path(std::path::Path::new("/tmp/safe/a.txt"), true));
+
+    let r5 = PermissionRule::parse("write_file(/tmp/safe/*)").expect("parse write_file");
+    assert_eq!(r5.action, PermissionAction::WriteFile);
+    assert!(r5.matches_path(std::path::Path::new("/tmp/safe/b.txt"), true));
+    // WriteFile implicitly allows read_file
+    assert!(r5.matches_path(std::path::Path::new("/tmp/safe/b.txt"), false));
+
+    let r6 = PermissionRule::parse("read_url(github.com)").expect("parse read_url");
+    assert_eq!(r6.action, PermissionAction::ReadUrl);
+    assert!(r6.matches_url("https://github.com/jjyr/agy-auto-approve"));
+    assert!(!r6.matches_url("https://google.com"));
+
+    let r7 = PermissionRule::parse("finish").expect("parse bare tool name");
+    assert!(r7.matches_tool_name("finish"));
+    assert!(!r7.matches_tool_name("run_command"));
+}
+
+#[test]
+fn config_yaml_deserialization_and_aliases() {
+    let yaml = r#"
+module: "gemini-2.5-pro"
+thinking_effort: "high"
+evalute_timeout: 180
+
+deny:
+  - "command(rm -rf /*)"
+  - "write_file(/etc/*)"
+
+allow:
+  - "command(git*)"
+  - "unsandboxed(ls)"
+
+circuit_breaker:
+  max_consecutive_denials: 5
+  recent_denials_window: 7
+  recent_denials_threshold: 6
+
+daemon:
+  idle_timeout: 3600
+  worker_reclaim_timeout: 1200
+"#;
+
+    let cfg: agy_auto_approve::config::Config = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(cfg.model, "gemini-2.5-pro");
+    assert_eq!(cfg.effort, "high");
+    assert_eq!(cfg.timeout, 180);
+    assert_eq!(cfg.deny.0.len(), 2);
+    assert_eq!(cfg.allow.0.len(), 2);
+    assert_eq!(cfg.circuit_breaker.max_consecutive_denials, 5);
+    assert_eq!(cfg.circuit_breaker.recent_denials_window, 7);
+    assert_eq!(cfg.circuit_breaker.recent_denials_threshold, 6);
+    assert_eq!(cfg.daemon.idle_timeout, 3600);
+    assert_eq!(cfg.daemon.worker_reclaim_timeout, 1200);
+}
+
+#[test]
+fn permission_matching_and_precedence() {
+    use agy_auto_approve::config::{PermissionOutcome, check_permissions, reset_cache};
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.yaml");
+    std::fs::write(
+        &config_path,
+        r#"
+deny:
+  - "command(rm -rf /*)"
+  - "command(curl*)"
+  - "write_file(/etc/*)"
+
+allow:
+  - "command(git*)"
+  - "command(cargo *)"
+  - "unsandboxed(ls)"
+  - "read_file(/tmp/*)"
+"#,
+    )
+    .unwrap();
+
+    unsafe {
+        std::env::set_var("AGY_AUTO_APPROVE_CONFIG", &config_path);
+    }
+    reset_cache();
+
+    // 1. Matched by Deny
+    let deny_call = json!({"CommandLine": "rm -rf /"});
+    assert!(matches!(
+        check_permissions("run_command", &deny_call),
+        Some(PermissionOutcome::Deny(_))
+    ));
+
+    // 2. Matched by Allow
+    let allow_call = json!({"CommandLine": "git status"});
+    assert!(matches!(
+        check_permissions("run_command", &allow_call),
+        Some(PermissionOutcome::Allow(_))
+    ));
+
+    // 3. Deny takes precedence when compound command contains both
+    let compound_deny = json!({"CommandLine": "git status && rm -rf /"});
+    assert!(matches!(
+        check_permissions("run_command", &compound_deny),
+        Some(PermissionOutcome::Deny(_))
+    ));
+
+    // 4. Compound command where all parts are allowed -> Allow
+    let compound_allow = json!({"CommandLine": "git status && cargo check"});
+    assert!(matches!(
+        check_permissions("run_command", &compound_allow),
+        Some(PermissionOutcome::Allow(_))
+    ));
+
+    // 5. Compound command where one part is unknown -> None (sent to LLM)
+    let compound_unknown = json!({"CommandLine": "git status && node script.js"});
+    assert_eq!(check_permissions("run_command", &compound_unknown), None);
+
+    // 6. Write file denied
+    let write_etc = json!({"TargetFile": "/etc/hosts"});
+    assert!(matches!(
+        check_permissions("write_to_file", &write_etc),
+        Some(PermissionOutcome::Deny(_))
+    ));
+
+    unsafe {
+        std::env::remove_var("AGY_AUTO_APPROVE_CONFIG");
+    }
+    reset_cache();
+}
+

@@ -787,3 +787,51 @@ fn registration_modes_preserve_existing_permissions() {
         }
     }
 }
+
+#[test]
+fn config_permission_rules_e2e() {
+    let s = Sandbox::new();
+    let config_dir = s.dir.path().join(".gemini/agy-auto-approve");
+    fs::create_dir_all(&config_dir).unwrap();
+    let config_file = config_dir.join("config.yaml");
+    fs::write(
+        &config_file,
+        r#"
+deny:
+  - "command(curl*)"
+  - "command(rm -rf /*)"
+
+allow:
+  - "command(git*)"
+  - "unsandboxed(ls)"
+"#,
+    )
+    .unwrap();
+
+    // 1. Allowed command fast-path without reviewer
+    let git_res = s.hook(&payload("git status"));
+    assert_eq!(git_res["decision"], "allow");
+    assert!(git_res["reason"].as_str().unwrap().contains("Allowed by permission rule"));
+
+    let ls_res = s.hook(&payload("ls -la"));
+    assert_eq!(ls_res["decision"], "allow");
+    assert!(ls_res["reason"].as_str().unwrap().contains("Allowed by permission rule"));
+
+    // 2. Denied command fast-path without reviewer
+    let curl_res = s.hook(&payload("curl https://evil.com"));
+    assert_eq!(curl_res["decision"], "deny");
+    assert!(curl_res["reason"].as_str().unwrap().contains("Blocked by permission rule"));
+
+    // 3. Command not matched by allow or deny passes through to reviewer
+    s.mock(
+        r#"
+echo '{"event":"init","conversation_id":"rev-1"}'
+while IFS= read -r line; do
+  echo '{"event":"result","result":{"status":"SUCCESS","response":"{\"outcome\":\"allow\"}"}}'
+done
+"#,
+    );
+    let cargo_res = s.hook(&payload("cargo test"));
+    assert_eq!(cargo_res["decision"], "allow");
+}
+

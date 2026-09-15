@@ -100,7 +100,7 @@ pub async fn start() -> Result<Value> {
         });
 
     let mut child = command.spawn().context("Cannot spawn daemon")?;
-    let until = Instant::now() + Duration::from_secs(5);
+    let until = Instant::now() + Duration::from_secs(15);
     while Instant::now() < until {
         if let Ok(v) = request(&path, &json!({"action": "ping"}), 1).await
             && v["status"] == "pong"

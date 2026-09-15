@@ -291,26 +291,25 @@ impl ConversationState {
     }
 
     /// Check if the circuit breaker has tripped.
-    /// Trips on:
-    /// 1. 3 consecutive denials.
-    /// 2. 4 denials in the last 5 evaluation results.
+    /// Trips when consecutive or windowed denials exceed configured thresholds.
     pub fn tripped(&self) -> Option<String> {
+        let (max_consecutive, window, threshold) = config::circuit_breaker_limits();
         let count = self.state["consecutive_denials"].as_u64().unwrap_or(0);
-        if count >= 3 {
+        if count >= max_consecutive {
             return Some(format!(
-                "Circuit breaker tripped: {count} consecutive denials exceeded threshold (3). Halting loop to prompt user."
+                "Circuit breaker tripped: {count} consecutive denials exceeded threshold ({max_consecutive}). Halting loop to prompt user."
             ));
         }
         if let Some(history) = self.state["history"].as_array() {
             let denials = history
                 .iter()
                 .rev()
-                .take(5)
+                .take(window)
                 .filter(|v| **v == "deny")
                 .count();
-            if history.len() >= 5 && denials >= 4 && history.last() == Some(&json!("deny")) {
+            if history.len() >= window && denials >= threshold && history.last() == Some(&json!("deny")) {
                 return Some(format!(
-                    "Circuit breaker tripped: {denials}/5 denials in recent window. Halting loop to prompt user."
+                    "Circuit breaker tripped: {denials}/{window} denials in recent window. Halting loop to prompt user."
                 ));
             }
         }
@@ -525,6 +524,20 @@ async fn evaluate_inner(payload: &Value, id: &str, stage: &mut &'static str) -> 
             "Internal reviewer process automatically approved.",
             tool,
         );
+    }
+
+    // Evaluate configured Antigravity permission rules (Deny > Allow).
+    if let Some(outcome) = config::check_permissions(tool, args) {
+        match outcome {
+            config::PermissionOutcome::Deny(reason) => {
+                *stage = "permission_deny";
+                return result("deny", &reason, tool);
+            }
+            config::PermissionOutcome::Allow(reason) => {
+                *stage = "permission_allow";
+                return result("allow", &reason, tool);
+            }
+        }
     }
 
     if read_only(tool) {
